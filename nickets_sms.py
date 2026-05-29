@@ -286,23 +286,23 @@ class NicketsSMS:
         resp, err = self.api.call('GET', f'/api/pub/v2/sms?reservationId={res_id}')
         if err or not resp:
             return
-        messages = resp.get('data', []) if isinstance(resp, dict) else []
-        seen = {m.get('id') for m in info.get('messages', [])}
-        new = []
-        for m in messages:
+        api_messages = resp.get('data', []) if isinstance(resp, dict) else []
+        if not api_messages:
+            return
+        messages = []
+        codes = []
+        for m in api_messages:
             mid = m.get('id', '')
-            if mid in seen:
-                continue
             body = m.get('smsContent', '') or m.get('body', '')
             frm = m.get('from', '')
             ts = m.get('createdAt', '')
-            new.append({'id': mid, 'from': frm, 'body': body, 'time': ts})
+            messages.append({'id': mid, 'from': frm, 'body': body, 'time': ts})
             code = m.get('parsedCode', '') or extract_code(body)
             if code:
-                info.setdefault('codes', []).append({'code': code, 'time': ts, 'body': body})
-        if new:
-            info.setdefault('messages', []).extend(new)
-            save_data(self.data)
+                codes.append({'code': code, 'time': ts, 'body': body})
+        info['messages'] = messages
+        info['codes'] = codes
+        save_data(self.data)
 
     def _start_auto_poll(self):
         def loop():
