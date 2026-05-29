@@ -293,11 +293,11 @@ class NicketsSMS:
             mid = m.get('id', '')
             if mid in seen:
                 continue
-            body = m.get('body', '')
+            body = m.get('smsContent', '') or m.get('body', '')
             frm = m.get('from', '')
             ts = m.get('createdAt', '')
             new.append({'id': mid, 'from': frm, 'body': body, 'time': ts})
-            code = extract_code(body)
+            code = m.get('parsedCode', '') or extract_code(body)
             if code:
                 info.setdefault('codes', []).append({'code': code, 'time': ts, 'body': body})
         if new:
