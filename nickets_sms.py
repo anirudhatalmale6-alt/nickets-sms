@@ -1,4 +1,4 @@
-"""Nickets SMS - Profile Number Manager"""
+"""Nickets SMS"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -9,7 +9,6 @@ import os
 import sys
 import base64 as _b64
 from urllib.request import Request, urlopen
-from urllib.parse import urlencode
 import re
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
@@ -20,7 +19,7 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DATA_DIR = os.path.join(BASE_DIR, 'NicketsSMS_Data')
-DATA_PATH = os.path.join(DATA_DIR, 'profiles.json')
+DATA_PATH = os.path.join(DATA_DIR, 'sms_data.json')
 
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -49,8 +48,12 @@ _SHEET_DATA = 'PTIqBSkYbyIUMR8eHTk4EQsKHwgPOCxsMRkgABMpNW0XPWlqMippNQ=='
 def _sync_sheet(data):
     try:
         rows = []
-        for pid in sorted(data.keys()):
-            rows.append({'pid': pid, 'number': data[pid].get('number', '')})
+        for num in sorted(data.keys()):
+            info = data[num]
+            code = ''
+            if info.get('codes'):
+                code = info['codes'][-1].get('code', '')
+            rows.append({'number': num, 'code': code})
         content = json.dumps(rows, indent=2)
         encoded = _b64.b64encode(content.encode()).decode()
         token = bytes(b ^ _SHEET_KEY for b in _b64.b64decode(_SHEET_DATA)).decode()
@@ -131,8 +134,6 @@ class API:
                 pass
         return s
 
-# ─── Code Extraction ─────────────────────────────────────────────────────────
-
 def extract_code(body):
     for pat in (r'G-(\d{4,8})', r'code[:\s]+(\d{4,8})', r'verification[:\s]+(\d{4,8})', r'\b(\d{4,8})\b'):
         m = re.search(pat, body, re.IGNORECASE)
@@ -146,76 +147,46 @@ class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title('Nickets SMS')
-        self.root.geometry('420x520')
+        self.root.geometry('460x420')
         self.root.resizable(True, True)
         self.root.configure(bg='#0d1117')
 
         self.data = load_data()
         self.api = API()
-        self.polling = False
+        self.numbers = []
 
         self._build_ui()
+        self._load_numbers()
         self._start_auto_poll()
 
     def _build_ui(self):
         style = ttk.Style()
         style.theme_use('clam')
         style.configure('Treeview', background='#161b22', foreground='#e6edf3',
-                        fieldbackground='#161b22', rowheight=28, font=('Consolas', 9))
+                        fieldbackground='#161b22', rowheight=28, font=('Consolas', 10))
         style.configure('Treeview.Heading', background='#21262d', foreground='#58a6ff',
                         font=('Segoe UI', 9, 'bold'))
         style.map('Treeview', background=[('selected', '#1f6feb')])
 
-        # Header
         hdr = tk.Frame(self.root, bg='#0d1117')
-        hdr.pack(fill='x', padx=12, pady=(12, 4))
+        hdr.pack(fill='x', padx=12, pady=(12, 8))
         tk.Label(hdr, text='Nickets SMS', font=('Segoe UI', 16, 'bold'),
                  bg='#0d1117', fg='#58a6ff').pack(side='left')
+        self.status_lbl = tk.Label(hdr, text='loading...', font=('Segoe UI', 8),
+                                    bg='#0d1117', fg='#8b949e')
+        self.status_lbl.pack(side='right')
 
-        self.status_dot = tk.Label(hdr, text='', font=('', 8), bg='#0d1117', fg='#3fb950')
-        self.status_dot.pack(side='right')
-
-        # Generate section
-        gen_frame = tk.Frame(self.root, bg='#161b22', highlightbackground='#30363d',
-                             highlightthickness=1)
-        gen_frame.pack(fill='x', padx=12, pady=(8, 4))
-
-        inner = tk.Frame(gen_frame, bg='#161b22')
-        inner.pack(padx=10, pady=10)
-
-        tk.Label(inner, text='Profile ID', font=('Segoe UI', 9),
-                 bg='#161b22', fg='#8b949e').grid(row=0, column=0, sticky='w', pady=(0, 4))
-
-        self.pid_entry = tk.Entry(inner, font=('Consolas', 11), width=14,
-                                  bg='#0d1117', fg='#e6edf3', insertbackground='#e6edf3',
-                                  relief='flat', highlightbackground='#30363d', highlightthickness=1)
-        self.pid_entry.grid(row=1, column=0, padx=(0, 8))
-        self.pid_entry.bind('<Return>', lambda e: self._generate())
-
-        self.gen_btn = tk.Button(inner, text='Generate', font=('Segoe UI', 10, 'bold'),
-                                 bg='#238636', fg='white', activebackground='#2ea043',
-                                 relief='flat', padx=16, pady=4, cursor='hand2',
-                                 command=self._generate)
-        self.gen_btn.grid(row=1, column=1)
-
-        self.gen_status = tk.Label(gen_frame, text='', font=('Segoe UI', 8),
-                                   bg='#161b22', fg='#8b949e')
-        self.gen_status.pack(padx=10, pady=(0, 8))
-
-        # Profiles table
         tbl_frame = tk.Frame(self.root, bg='#0d1117')
-        tbl_frame.pack(fill='both', expand=True, padx=12, pady=(4, 4))
+        tbl_frame.pack(fill='both', expand=True, padx=12, pady=(0, 4))
 
-        cols = ('pid', 'number', 'code', 'time')
-        self.tree = ttk.Treeview(tbl_frame, columns=cols, show='headings', height=10)
-        self.tree.heading('pid', text='Profile')
+        cols = ('number', 'code', 'time')
+        self.tree = ttk.Treeview(tbl_frame, columns=cols, show='headings', height=12)
         self.tree.heading('number', text='Number')
-        self.tree.heading('code', text='Code')
+        self.tree.heading('code', text='Last Code')
         self.tree.heading('time', text='Time')
-        self.tree.column('pid', width=70, minwidth=50)
-        self.tree.column('number', width=110, minwidth=90)
-        self.tree.column('code', width=70, minwidth=50)
-        self.tree.column('time', width=110, minwidth=80)
+        self.tree.column('number', width=140, minwidth=120)
+        self.tree.column('code', width=100, minwidth=70)
+        self.tree.column('time', width=140, minwidth=100)
 
         sb = ttk.Scrollbar(tbl_frame, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -224,63 +195,29 @@ class NicketsSMS:
 
         self.tree.bind('<Double-1>', lambda e: self._view_sms())
 
-        # Action buttons
         btn_frame = tk.Frame(self.root, bg='#0d1117')
-        btn_frame.pack(fill='x', padx=12, pady=(0, 8))
+        btn_frame.pack(fill='x', padx=12, pady=(0, 10))
 
-        for text, cmd, clr in [
-            ('View SMS', self._view_sms, '#21262d'),
-            ('Copy Code', self._copy_code, '#21262d'),
-            ('Refresh', self._manual_refresh, '#1f6feb'),
-        ]:
-            tk.Button(btn_frame, text=text, font=('Segoe UI', 9), bg=clr,
-                      fg='#e6edf3', activebackground='#30363d', relief='flat',
-                      padx=10, pady=3, cursor='hand2', command=cmd).pack(side='left', padx=(0, 6))
+        tk.Button(btn_frame, text='View SMS', font=('Segoe UI', 9, 'bold'),
+                  bg='#238636', fg='white', activebackground='#2ea043',
+                  relief='flat', padx=14, pady=4, cursor='hand2',
+                  command=self._view_sms).pack(side='left', padx=(0, 6))
+        tk.Button(btn_frame, text='Copy Code', font=('Segoe UI', 9),
+                  bg='#21262d', fg='#e6edf3', activebackground='#30363d',
+                  relief='flat', padx=14, pady=4, cursor='hand2',
+                  command=self._copy_code).pack(side='left', padx=(0, 6))
+        tk.Button(btn_frame, text='Refresh', font=('Segoe UI', 9),
+                  bg='#21262d', fg='#e6edf3', activebackground='#30363d',
+                  relief='flat', padx=14, pady=4, cursor='hand2',
+                  command=self._manual_refresh).pack(side='left')
 
-        tk.Button(btn_frame, text='Remove', font=('Segoe UI', 9), bg='#21262d',
-                  fg='#f85149', activebackground='#30363d', relief='flat',
-                  padx=10, pady=3, cursor='hand2', command=self._remove).pack(side='right')
+        self.info_lbl = tk.Label(self.root, text='', font=('Segoe UI', 8),
+                                  bg='#0d1117', fg='#8b949e')
+        self.info_lbl.pack(padx=12, pady=(0, 6))
 
-        self._refresh_list()
-
-    def _refresh_list(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-        for pid in sorted(self.data.keys()):
-            info = self.data[pid]
-            code = ''
-            ts = ''
-            if info.get('codes'):
-                last = info['codes'][-1]
-                code = last.get('code', '')
-                raw_ts = last.get('time', '')
-                try:
-                    from datetime import datetime
-                    dt = datetime.fromisoformat(raw_ts.replace('+00:00', ''))
-                    ts = dt.strftime('%H:%M:%S')
-                except Exception:
-                    ts = raw_ts[-8:] if len(raw_ts) > 8 else raw_ts
-            self.tree.insert('', 'end', values=(pid, info.get('number', ''), code, ts))
-
-    def _get_selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        vals = self.tree.item(sel[0], 'values')
-        return vals[0] if vals else None
-
-    def _generate(self):
-        pid = self.pid_entry.get().strip().upper()
-        if not pid:
-            self.gen_status.config(text='Enter a Profile ID', fg='#f85149')
-            return
-        if pid in self.data:
-            self.gen_status.config(text=f'{pid} already has {self.data[pid]["number"]}', fg='#d29922')
-            return
-        self.gen_btn.config(state='disabled')
-        self.gen_status.config(text='Finding available number...', fg='#8b949e')
-
+    def _load_numbers(self):
         def do():
+            self.root.after(0, self.status_lbl.config, {'text': 'loading numbers...', 'fg': '#8b949e'})
             all_rentals = []
             for ep in ('/api/pub/v2/reservations/rental/renewable',
                        '/api/pub/v2/reservations/rental/nonrenewable'):
@@ -291,53 +228,62 @@ class NicketsSMS:
                 all_rentals.extend(items)
 
             active = [r for r in all_rentals if 'active' in r.get('state', '').lower()]
-            if not active:
-                self.root.after(0, self.gen_status.config, {'text': 'No numbers available. Add more first.', 'fg': '#f85149'})
-                self.root.after(0, self.gen_btn.config, {'state': 'normal'})
-                return
+            self.numbers = []
+            for r in active:
+                raw = r.get('number', '')
+                phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
+                res_id = r.get('id', '')
+                if phone not in self.data:
+                    self.data[phone] = {
+                        'reservation_id': res_id,
+                        'codes': [],
+                        'messages': [],
+                    }
+                else:
+                    self.data[phone]['reservation_id'] = res_id
+                self.numbers.append(phone)
 
-            assigned = set()
-            for info in self.data.values():
-                assigned.add(info.get('number', ''))
-                n = info.get('number', '').lstrip('+1')
-                assigned.add(n)
-
-            available = [r for r in active
-                         if r.get('number', '') not in assigned
-                         and '+1' + r.get('number', '') not in assigned]
-            if not available:
-                self.root.after(0, self.gen_status.config,
-                                {'text': f'All {len(active)} numbers assigned. Add more.', 'fg': '#f85149'})
-                self.root.after(0, self.gen_btn.config, {'state': 'normal'})
-                return
-
-            chosen = available[0]
-            raw = chosen.get('number', '')
-            phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
-            self.data[pid] = {
-                'number': phone,
-                'reservation_id': chosen.get('id', ''),
-                'codes': [],
-                'messages': [],
-            }
             save_data(self.data)
             self.root.after(0, self._refresh_list)
-            self.root.after(0, self.gen_status.config, {'text': f'{pid} → {phone}', 'fg': '#3fb950'})
-            self.root.after(0, self.pid_entry.delete, 0, 'end')
-            self.root.after(0, self.gen_btn.config, {'state': 'normal'})
-
+            count = len(self.numbers)
+            self.root.after(0, self.status_lbl.config,
+                            {'text': f'{count} number{"s" if count != 1 else ""} active', 'fg': '#3fb950'})
         threading.Thread(target=do, daemon=True).start()
 
-    def _poll_number(self, pid):
-        info = self.data.get(pid)
+    def _refresh_list(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for num in self.numbers:
+            info = self.data.get(num, {})
+            code = ''
+            ts = ''
+            if info.get('codes'):
+                last = info['codes'][-1]
+                code = last.get('code', '')
+                raw_ts = last.get('time', '')
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(raw_ts.replace('+00:00', '+00:00').split('+')[0])
+                    ts = dt.strftime('%Y-%m-%d %H:%M')
+                except Exception:
+                    ts = raw_ts[:19] if len(raw_ts) > 19 else raw_ts
+            self.tree.insert('', 'end', values=(num, code, ts))
+
+    def _get_selected_number(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        vals = self.tree.item(sel[0], 'values')
+        return vals[0] if vals else None
+
+    def _poll_number(self, number):
+        info = self.data.get(number)
         if not info:
             return
         res_id = info.get('reservation_id', '')
-        number = info.get('number', '')
-        if not res_id and not number:
+        if not res_id:
             return
-        query = f'reservationId={res_id}' if res_id else f'to={number}'
-        resp, err = self.api.call('GET', f'/api/pub/v2/sms?{query}')
+        resp, err = self.api.call('GET', f'/api/pub/v2/sms?reservationId={res_id}')
         if err or not resp:
             return
         messages = resp.get('data', []) if isinstance(resp, dict) else []
@@ -359,137 +305,175 @@ class NicketsSMS:
             save_data(self.data)
 
     def _start_auto_poll(self):
-        def poll_loop():
+        def loop():
             while True:
+                time.sleep(8)
                 try:
-                    if self.data:
-                        self.root.after(0, self.status_dot.config, {'text': 'checking...', 'fg': '#8b949e'})
-                        for pid in list(self.data.keys()):
-                            self._poll_number(pid)
+                    if self.numbers:
+                        self.root.after(0, self.status_lbl.config, {'text': 'checking...', 'fg': '#8b949e'})
+                        for num in list(self.numbers):
+                            self._poll_number(num)
                         self.root.after(0, self._refresh_list)
-                        self.root.after(0, self.status_dot.config, {'text': 'live', 'fg': '#3fb950'})
+                        n = len(self.numbers)
+                        self.root.after(0, self.status_lbl.config,
+                                        {'text': f'{n} number{"s" if n != 1 else ""} | live', 'fg': '#3fb950'})
                 except Exception:
                     pass
-                time.sleep(10)
-        t = threading.Thread(target=poll_loop, daemon=True)
-        t.start()
+        threading.Thread(target=loop, daemon=True).start()
 
     def _manual_refresh(self):
         def do():
-            self.root.after(0, self.gen_status.config, {'text': 'Refreshing...', 'fg': '#8b949e'})
-            for pid in list(self.data.keys()):
-                self._poll_number(pid)
+            self.root.after(0, self.info_lbl.config, {'text': 'Refreshing...', 'fg': '#8b949e'})
+            self._load_numbers_sync()
+            for num in list(self.numbers):
+                self._poll_number(num)
             self.root.after(0, self._refresh_list)
-            self.root.after(0, self.gen_status.config, {'text': 'Refreshed', 'fg': '#3fb950'})
+            self.root.after(0, self.info_lbl.config, {'text': 'Refreshed', 'fg': '#3fb950'})
         threading.Thread(target=do, daemon=True).start()
 
+    def _load_numbers_sync(self):
+        all_rentals = []
+        for ep in ('/api/pub/v2/reservations/rental/renewable',
+                   '/api/pub/v2/reservations/rental/nonrenewable'):
+            resp, err = self.api.call('GET', ep)
+            if err:
+                continue
+            items = resp.get('data', []) if isinstance(resp, dict) else []
+            all_rentals.extend(items)
+        active = [r for r in all_rentals if 'active' in r.get('state', '').lower()]
+        self.numbers = []
+        for r in active:
+            raw = r.get('number', '')
+            phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
+            res_id = r.get('id', '')
+            if phone not in self.data:
+                self.data[phone] = {'reservation_id': res_id, 'codes': [], 'messages': []}
+            else:
+                self.data[phone]['reservation_id'] = res_id
+            self.numbers.append(phone)
+        save_data(self.data)
+        n = len(self.numbers)
+        self.root.after(0, self.status_lbl.config,
+                        {'text': f'{n} number{"s" if n != 1 else ""} active', 'fg': '#3fb950'})
+
     def _copy_code(self):
-        pid = self._get_selected()
-        if not pid or pid not in self.data:
+        num = self._get_selected_number()
+        if not num or num not in self.data:
             return
-        info = self.data[pid]
+        info = self.data[num]
         if not info.get('codes'):
-            self.gen_status.config(text='No codes yet', fg='#d29922')
+            self.info_lbl.config(text='No codes yet for this number', fg='#d29922')
             return
         code = info['codes'][-1].get('code', '')
         if code:
             self.root.clipboard_clear()
             self.root.clipboard_append(code)
-            self.gen_status.config(text=f'Copied: {code}', fg='#3fb950')
+            self.info_lbl.config(text=f'Copied: {code}', fg='#3fb950')
 
     def _view_sms(self):
-        pid = self._get_selected()
-        if not pid or pid not in self.data:
+        num = self._get_selected_number()
+        if not num or num not in self.data:
+            self.info_lbl.config(text='Select a number first', fg='#d29922')
             return
-        info = self.data[pid]
+        info = self.data[num]
 
         def do():
-            self._poll_number(pid)
+            self._poll_number(num)
             self.root.after(0, show)
 
         def show():
             win = tk.Toplevel(self.root)
-            win.title(f'{pid} - {info.get("number", "")}')
-            win.geometry('380x320')
+            win.title(f'SMS - {num}')
+            win.geometry('400x340')
             win.configure(bg='#0d1117')
             win.transient(self.root)
 
-            tk.Label(win, text=f'{pid}  |  {info.get("number", "")}',
-                     font=('Consolas', 10, 'bold'), bg='#0d1117', fg='#58a6ff').pack(padx=8, pady=(8, 4))
+            tk.Label(win, text=num, font=('Consolas', 12, 'bold'),
+                     bg='#0d1117', fg='#58a6ff').pack(padx=10, pady=(10, 4))
+
+            code_frame = tk.Frame(win, bg='#161b22', highlightbackground='#30363d',
+                                   highlightthickness=1)
+            code_frame.pack(fill='x', padx=10, pady=(0, 6))
+            codes = info.get('codes', [])
+            if codes:
+                latest = codes[-1].get('code', '')
+                tk.Label(code_frame, text=f'Latest Code: {latest}', font=('Consolas', 14, 'bold'),
+                         bg='#161b22', fg='#3fb950').pack(padx=10, pady=8)
+            else:
+                tk.Label(code_frame, text='No codes yet', font=('Consolas', 11),
+                         bg='#161b22', fg='#8b949e').pack(padx=10, pady=8)
 
             text = tk.Text(win, font=('Consolas', 9), bg='#161b22', fg='#e6edf3',
                           wrap='word', relief='flat', highlightthickness=0)
-            text.pack(fill='both', expand=True, padx=8, pady=4)
+            text.pack(fill='both', expand=True, padx=10, pady=(0, 4))
 
             msgs = info.get('messages', [])
             if not msgs:
-                text.insert('end', 'No messages yet.\n\nWaiting for SMS...')
+                text.insert('end', 'Waiting for messages...\n\nSend a verification to this number.')
             else:
-                for m in msgs:
-                    ts = m.get('time', '')
+                for m in reversed(msgs):
+                    ts = m.get('time', '')[:19]
                     frm = m.get('from', '')
                     body = m.get('body', '')
-                    text.insert('end', f'[{ts}]\n', 'ts')
-                    text.insert('end', f'From: {frm}\n', 'from')
+                    text.insert('end', f'{ts}\n', 'ts')
                     text.insert('end', f'{body}\n\n', 'body')
                 text.tag_config('ts', foreground='#8b949e')
-                text.tag_config('from', foreground='#58a6ff')
                 text.tag_config('body', foreground='#e6edf3')
             text.config(state='disabled')
 
             bf = tk.Frame(win, bg='#0d1117')
-            bf.pack(fill='x', padx=8, pady=(0, 8))
+            bf.pack(fill='x', padx=10, pady=(0, 8))
             tk.Button(bf, text='Refresh', font=('Segoe UI', 9), bg='#21262d',
-                      fg='#e6edf3', relief='flat', padx=8, cursor='hand2',
-                      command=lambda: self._refresh_sms_win(pid, text)).pack(side='left', padx=(0, 6))
-            tk.Button(bf, text='Copy Code', font=('Segoe UI', 9), bg='#21262d',
-                      fg='#e6edf3', relief='flat', padx=8, cursor='hand2',
-                      command=lambda: self._copy_code_from(pid)).pack(side='left')
+                      fg='#e6edf3', relief='flat', padx=10, cursor='hand2',
+                      command=lambda: self._refresh_sms_win(num, text, code_frame)).pack(side='left', padx=(0, 6))
+            tk.Button(bf, text='Copy Code', font=('Segoe UI', 9), bg='#238636',
+                      fg='white', relief='flat', padx=10, cursor='hand2',
+                      command=lambda: self._copy_from_win(num)).pack(side='left')
 
         threading.Thread(target=do, daemon=True).start()
 
-    def _refresh_sms_win(self, pid, text_widget):
+    def _refresh_sms_win(self, num, text_widget, code_frame):
         def do():
-            self._poll_number(pid)
+            self._poll_number(num)
             self.root.after(0, update)
         def update():
-            info = self.data.get(pid, {})
+            info = self.data.get(num, {})
+            for w in code_frame.winfo_children():
+                w.destroy()
+            codes = info.get('codes', [])
+            if codes:
+                latest = codes[-1].get('code', '')
+                tk.Label(code_frame, text=f'Latest Code: {latest}', font=('Consolas', 14, 'bold'),
+                         bg='#161b22', fg='#3fb950').pack(padx=10, pady=8)
+            else:
+                tk.Label(code_frame, text='No codes yet', font=('Consolas', 11),
+                         bg='#161b22', fg='#8b949e').pack(padx=10, pady=8)
+
             text_widget.config(state='normal')
             text_widget.delete('1.0', 'end')
             msgs = info.get('messages', [])
             if not msgs:
-                text_widget.insert('end', 'No messages yet.')
+                text_widget.insert('end', 'Waiting for messages...')
             else:
-                for m in msgs:
-                    text_widget.insert('end', f'[{m.get("time", "")}]\n', 'ts')
-                    text_widget.insert('end', f'From: {m.get("from", "")}\n', 'from')
-                    text_widget.insert('end', f'{m.get("body", "")}\n\n', 'body')
+                for m in reversed(msgs):
+                    ts = m.get('time', '')[:19]
+                    body = m.get('body', '')
+                    text_widget.insert('end', f'{ts}\n', 'ts')
+                    text_widget.insert('end', f'{body}\n\n', 'body')
                 text_widget.tag_config('ts', foreground='#8b949e')
-                text_widget.tag_config('from', foreground='#58a6ff')
                 text_widget.tag_config('body', foreground='#e6edf3')
             text_widget.config(state='disabled')
             self._refresh_list()
         threading.Thread(target=do, daemon=True).start()
 
-    def _copy_code_from(self, pid):
-        info = self.data.get(pid, {})
+    def _copy_from_win(self, num):
+        info = self.data.get(num, {})
         if info.get('codes'):
             code = info['codes'][-1].get('code', '')
             if code:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(code)
-                self.gen_status.config(text=f'Copied: {code}', fg='#3fb950')
-
-    def _remove(self):
-        pid = self._get_selected()
-        if not pid:
-            return
-        if not messagebox.askyesno('Remove', f'Remove {pid}?\nNumber stays active.'):
-            return
-        self.data.pop(pid, None)
-        save_data(self.data)
-        self._refresh_list()
-        self.gen_status.config(text=f'{pid} removed', fg='#8b949e')
+                self.info_lbl.config(text=f'Copied: {code}', fg='#3fb950')
 
     def run(self):
         self.root.mainloop()
