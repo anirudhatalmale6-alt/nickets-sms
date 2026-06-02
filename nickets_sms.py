@@ -1,4 +1,4 @@
-"""Nickets SMS v2.1 - Split Panel Layout"""
+"""Nickets SMS v3.0 - Cloud Synced Multi-VA"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -9,15 +9,15 @@ import os
 import sys
 import base64 as _b64
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 import re
+import uuid
 
 # ─── Login ──────────────────────────────────────────────────────────────────
 
 _LOGIN_USER = 'Nickets@gmail.com'
 _LOGIN_PASS = 'NickNick#100'
 MAX_ACCOUNTS = 4
-
-_DEFAULT_ACCOUNTS = []
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -29,9 +29,22 @@ else:
 DATA_DIR = os.path.join(BASE_DIR, 'NicketsSMS_Data')
 DATA_PATH = os.path.join(DATA_DIR, 'sms_data.json')
 ACCOUNTS_PATH = os.path.join(DATA_DIR, 'accounts.json')
+INSTANCE_PATH = os.path.join(DATA_DIR, 'instance_id.txt')
 
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
+
+def get_instance_id():
+    ensure_dirs()
+    if os.path.exists(INSTANCE_PATH):
+        with open(INSTANCE_PATH, 'r') as f:
+            return f.read().strip()
+    iid = uuid.uuid4().hex[:8]
+    with open(INSTANCE_PATH, 'w') as f:
+        f.write(iid)
+    return iid
+
+INSTANCE_ID = get_instance_id()
 
 def load_data():
     if os.path.exists(DATA_PATH):
@@ -42,11 +55,10 @@ def load_data():
             pass
     return {}
 
-def save_data(data):
+def save_data_local(data):
     ensure_dirs()
     with open(DATA_PATH, 'w') as f:
         json.dump(data, f, indent=2)
-    threading.Thread(target=_sync_sheet, args=(data,), daemon=True).start()
 
 def load_accounts():
     if os.path.exists(ACCOUNTS_PATH):
@@ -62,44 +74,114 @@ def save_accounts(accounts):
     with open(ACCOUNTS_PATH, 'w') as f:
         json.dump(accounts, f, indent=2)
 
-# ─── Web Sheet Sync ─────────────────────────────────────────────────────────
+# ─── Cloud Sync (GitHub) ───────────────────────────────────────────────────
 
-_SHEET_REPO = 'anirudhatalmale6-alt/mlm-sms-sheet'
-_SHEET_KEY = 0x5A
-_SHEET_DATA = 'PTIqBSkYbyIUMR8eHTk4EQsKHwgPOCxsMRkgABMpNW0XPWlqMippNQ=='
+_SYNC_REPO = 'anirudhatalmale6-alt/mlm-sms-sheet'
+_SYNC_KEY = 0x5A
+_SYNC_DATA = 'PTIqBSkYbyIUMR8eHTk4EQsKHwgPOCxsMRkgABMpNW0XPWlqMippNQ=='
+_SYNC_FILE = 'cloud_data.json'
 
-def _sync_sheet(data):
+def _get_sync_token():
+    return bytes(b ^ _SYNC_KEY for b in _b64.b64decode(_SYNC_DATA)).decode()
+
+def _sync_headers():
+    return {
+        'Authorization': f'token {_get_sync_token()}',
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'NicketsSMS',
+    }
+
+def cloud_pull():
     try:
-        rows = []
-        for num in sorted(data.keys()):
-            info = data[num]
-            code = ''
-            if info.get('codes'):
-                code = info['codes'][-1].get('code', '')
-            rows.append({'number': num, 'code': code})
-        content = json.dumps(rows, indent=2)
+        url = f'https://api.github.com/repos/{_SYNC_REPO}/contents/{_SYNC_FILE}'
+        req = Request(url, headers=_sync_headers())
+        with urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+        content = _b64.b64decode(result.get('content', '')).decode()
+        sha = result.get('sha', '')
+        return json.loads(content), sha, None
+    except HTTPError as e:
+        if e.code == 404:
+            return {}, '', None
+        return None, '', str(e)
+    except Exception as e:
+        return None, '', str(e)
+
+def cloud_push(data, old_sha=''):
+    try:
+        content = json.dumps(data, indent=2)
         encoded = _b64.b64encode(content.encode()).decode()
-        token = bytes(b ^ _SHEET_KEY for b in _b64.b64decode(_SHEET_DATA)).decode()
-        url = f'https://api.github.com/repos/{_SHEET_REPO}/contents/data.json'
-        headers = {
-            'Authorization': f'token {token}',
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'NicketsSMS',
-        }
-        req = Request(url, headers=headers)
-        with urlopen(req, timeout=10) as resp:
-            existing = json.loads(resp.read().decode())
-        sha = existing.get('sha', '')
-        payload = json.dumps({
-            'message': 'sync',
+        url = f'https://api.github.com/repos/{_SYNC_REPO}/contents/{_SYNC_FILE}'
+
+        payload = {
+            'message': f'sync {INSTANCE_ID}',
             'content': encoded,
-            'sha': sha,
-        }).encode()
-        req = Request(url, data=payload, headers=headers, method='PUT')
+        }
+        if old_sha:
+            payload['sha'] = old_sha
+
+        body = json.dumps(payload).encode()
+        req = Request(url, data=body, headers=_sync_headers(), method='PUT')
         req.add_header('Content-Type', 'application/json')
-        urlopen(req, timeout=10)
-    except Exception:
-        pass
+        with urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+        return result.get('content', {}).get('sha', ''), None
+    except HTTPError as e:
+        if e.code == 409 or e.code == 422:
+            return '', 'conflict'
+        return '', str(e)
+    except Exception as e:
+        return '', str(e)
+
+def merge_data(local, cloud):
+    merged = dict(cloud) if cloud else {}
+    for num, info in (local or {}).items():
+        if num not in merged:
+            merged[num] = info
+        else:
+            cloud_info = merged[num]
+            local_msgs = len(info.get('messages', []))
+            cloud_msgs = len(cloud_info.get('messages', []))
+            if local_msgs > cloud_msgs:
+                merged[num] = info
+            elif local_msgs == cloud_msgs:
+                local_codes = len(info.get('codes', []))
+                cloud_codes = len(cloud_info.get('codes', []))
+                if local_codes > cloud_codes:
+                    merged[num] = info
+    return merged
+
+_cloud_sha = ''
+_cloud_lock = threading.Lock()
+
+def cloud_sync(local_data):
+    global _cloud_sha
+    with _cloud_lock:
+        cloud_data, sha, err = cloud_pull()
+        if err:
+            return local_data, False
+
+        if cloud_data is None:
+            cloud_data = {}
+
+        _cloud_sha = sha
+        merged = merge_data(local_data, cloud_data)
+
+        if merged != cloud_data:
+            new_sha, push_err = cloud_push(merged, _cloud_sha)
+            if push_err == 'conflict':
+                cloud_data2, sha2, _ = cloud_pull()
+                if cloud_data2:
+                    _cloud_sha = sha2
+                    merged = merge_data(local_data, cloud_data2)
+                    new_sha, push_err = cloud_push(merged, _cloud_sha)
+                    if not push_err:
+                        _cloud_sha = new_sha
+            elif not push_err:
+                _cloud_sha = new_sha
+
+        save_data_local(merged)
+        return merged, True
 
 # ─── API ────────────────────────────────────────────────────────────────────
 
@@ -229,13 +311,13 @@ class LoginWindow:
         self.root.mainloop()
         return self.authenticated
 
-# ─── Main App (Split Panel) ────────────────────────────────────────────────
+# ─── Main App ───────────────────────────────────────────────────────────────
 
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v2.1')
-        self.root.geometry('920x600')
+        self.root.title('Nickets SMS v3.0')
+        self.root.geometry('920x620')
         self.root.minsize(800, 500)
         self.root.resizable(True, True)
         self.root.configure(bg='#0d1117')
@@ -247,12 +329,14 @@ class NicketsSMS:
         self._number_account_map = {}
         self._selected_number = None
         self._acct_entries = []
+        self._sync_ok = False
 
         self._init_apis()
         self._setup_styles()
         self._build_ui()
         self._load_numbers()
         self._start_auto_poll()
+        self._start_cloud_sync()
 
     def _init_apis(self):
         self.apis = []
@@ -277,6 +361,12 @@ class NicketsSMS:
         hdr.pack(fill='x', padx=10, pady=(8, 4))
         tk.Label(hdr, text='Nickets SMS', font=('Segoe UI', 14, 'bold'),
                  bg='#0d1117', fg='#58a6ff').pack(side='left')
+
+        self.sync_lbl = tk.Label(hdr, text='CLOUD: connecting...',
+                                 font=('Segoe UI', 8, 'bold'),
+                                 bg='#0d1117', fg='#d29922')
+        self.sync_lbl.pack(side='left', padx=(10, 0))
+
         self.status_lbl = tk.Label(hdr, text='loading...', font=('Segoe UI', 8),
                                    bg='#0d1117', fg='#8b949e')
         self.status_lbl.pack(side='right')
@@ -284,12 +374,12 @@ class NicketsSMS:
                                   bg='#0d1117', fg='#3fb950')
         self.count_lbl.pack(side='right', padx=(0, 12))
 
-        # Main split: left (numbers) | right (SMS + accounts)
+        # Main split
         main = tk.PanedWindow(self.root, orient='horizontal', bg='#30363d',
                               sashwidth=3, sashrelief='flat')
         main.pack(fill='both', expand=True, padx=10, pady=(0, 6))
 
-        # ── LEFT: Number list ──
+        # LEFT: Number list
         left = tk.Frame(main, bg='#0d1117')
         main.add(left, width=340, minsize=250)
 
@@ -331,11 +421,11 @@ class NicketsSMS:
                                  bg='#0d1117', fg='#8b949e')
         self.info_lbl.pack(side='right')
 
-        # ── RIGHT: SMS view + Account slots ──
+        # RIGHT: SMS + Accounts
         right = tk.Frame(main, bg='#0d1117')
         main.add(right, minsize=350)
 
-        # SMS panel (top part of right)
+        # SMS panel
         sms_frame = tk.LabelFrame(right, text='  SMS Messages  ',
                                    font=('Segoe UI', 9, 'bold'),
                                    bg='#161b22', fg='#58a6ff',
@@ -364,7 +454,7 @@ class NicketsSMS:
         self.sms_text.tag_config('body', foreground='#e6edf3')
         self.sms_text.tag_config('hint', foreground='#8b949e')
 
-        # Accounts panel (bottom part of right)
+        # Accounts panel
         acct_outer = tk.LabelFrame(right, text='  Accounts  ',
                                     font=('Segoe UI', 9, 'bold'),
                                     bg='#161b22', fg='#58a6ff',
@@ -397,7 +487,7 @@ class NicketsSMS:
 
             has_creds = bool(acct.get('username') and acct.get('api_key'))
             dot_color = '#3fb950' if has_creds else '#30363d'
-            dot = tk.Label(row, text='●', font=('Segoe UI', 10),
+            dot = tk.Label(row, text='*', font=('Segoe UI', 10),
                           bg='#161b22', fg=dot_color)
             dot.pack(side='left', padx=(0, 4))
 
@@ -531,7 +621,12 @@ class NicketsSMS:
                     self.root.after(0, self.count_lbl.config,
                                    {'text': f'{total_loaded} numbers'})
 
-            save_data(self.data)
+            # Also include cloud-only numbers not in local accounts
+            for num in self.data:
+                if num not in self._number_account_map:
+                    self.numbers.append(num)
+
+            save_data_local(self.data)
             self.root.after(0, self._refresh_list)
             count = len(self.numbers)
             self.root.after(0, self.count_lbl.config,
@@ -548,7 +643,7 @@ class NicketsSMS:
         for num in self.numbers:
             info = self.data.get(num, {})
             acct_idx = self._number_account_map.get(num, info.get('account_idx', -1))
-            acct_label = str(acct_idx + 1) if acct_idx >= 0 else '-'
+            acct_label = str(acct_idx + 1) if acct_idx >= 0 else 'C'
             code = ''
             if info.get('codes'):
                 code = info['codes'][-1].get('code', '')
@@ -607,7 +702,7 @@ class NicketsSMS:
                 codes.append({'code': code, 'time': ts, 'body': body})
         info['messages'] = messages
         info['codes'] = codes
-        save_data(self.data)
+        save_data_local(self.data)
 
     def _start_auto_poll(self):
         def loop():
@@ -617,7 +712,8 @@ class NicketsSMS:
                     if self.numbers:
                         self.root.after(0, self.status_lbl.config, {'text': 'checking...', 'fg': '#8b949e'})
                         for num in list(self.numbers):
-                            self._poll_number(num)
+                            if num in self._number_account_map:
+                                self._poll_number(num)
                         self.root.after(0, self._refresh_list)
                         if self._selected_number:
                             self.root.after(0, lambda: self._show_sms(self._selected_number))
@@ -627,12 +723,40 @@ class NicketsSMS:
                     pass
         threading.Thread(target=loop, daemon=True).start()
 
+    def _start_cloud_sync(self):
+        def loop():
+            while True:
+                try:
+                    self.data, ok = cloud_sync(self.data)
+                    self._sync_ok = ok
+                    if ok:
+                        # Rebuild numbers list to include cloud data
+                        cloud_nums = [n for n in self.data if n not in self._number_account_map]
+                        all_nums = [n for n in self.numbers if n in self._number_account_map]
+                        all_nums.extend(cloud_nums)
+                        self.numbers = all_nums
+                        self.root.after(0, self._refresh_list)
+                        if self._selected_number:
+                            self.root.after(0, lambda: self._show_sms(self._selected_number))
+                        self.root.after(0, self.sync_lbl.config,
+                                        {'text': 'CLOUD: synced', 'fg': '#3fb950'})
+                    else:
+                        self.root.after(0, self.sync_lbl.config,
+                                        {'text': 'CLOUD: offline', 'fg': '#f85149'})
+                except Exception:
+                    self.root.after(0, self.sync_lbl.config,
+                                    {'text': 'CLOUD: error', 'fg': '#f85149'})
+                time.sleep(10)
+        threading.Thread(target=loop, daemon=True).start()
+
     def _manual_refresh(self):
         def do():
             self.root.after(0, self.info_lbl.config, {'text': 'Refreshing...', 'fg': '#8b949e'})
             self._load_numbers_sync()
             for num in list(self.numbers):
-                self._poll_number(num)
+                if num in self._number_account_map:
+                    self._poll_number(num)
+            self.data, _ = cloud_sync(self.data)
             self.root.after(0, self._refresh_list)
             if self._selected_number:
                 self.root.after(0, lambda: self._show_sms(self._selected_number))
@@ -664,7 +788,12 @@ class NicketsSMS:
                     self.data[phone]['account_idx'] = idx
                 self.numbers.append(phone)
                 self._number_account_map[phone] = idx
-        save_data(self.data)
+
+        for num in self.data:
+            if num not in self._number_account_map:
+                self.numbers.append(num)
+
+        save_data_local(self.data)
         n = len(self.numbers)
         self.root.after(0, self.count_lbl.config,
                         {'text': f'{n} number{"s" if n != 1 else ""}'})
