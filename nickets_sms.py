@@ -1,4 +1,4 @@
-"""Nickets SMS v5.2 - Number Slot Manager (Cloud Sync)"""
+"""Nickets SMS v5.3 - Number Slot Manager (Real-Time Cloud Sync)"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -230,7 +230,7 @@ class LoginWindow:
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v5.2')
+        self.root.title('Nickets SMS v5.3')
         self.root.geometry('980x580')
         self.root.minsize(860, 480)
         self.root.resizable(True, True)
@@ -395,6 +395,48 @@ class NicketsSMS:
 
             self._slot_entries.append((e, dot))
 
+        # Notes panel (per number)
+        notes_frame = tk.LabelFrame(right, text='  Notes  ',
+                                     font=('Segoe UI', 9, 'bold'),
+                                     bg='#161b22', fg='#58a6ff',
+                                     highlightbackground='#30363d', highlightthickness=1,
+                                     relief='groove', bd=1)
+        notes_frame.pack(fill='x', pady=(0, 2))
+
+        notes_row = tk.Frame(notes_frame, bg='#161b22')
+        notes_row.pack(fill='x', padx=8, pady=(4, 8))
+
+        self.notes_entry = tk.Entry(notes_row, font=('Consolas', 10), bg='#0d1117',
+                                     fg='#e6edf3', insertbackground='#e6edf3',
+                                     relief='flat', highlightthickness=1,
+                                     highlightbackground='#30363d')
+        self.notes_entry.pack(side='left', fill='x', expand=True, ipady=3, padx=(0, 6))
+        self.notes_entry.insert(0, 'Select a number first')
+        self.notes_entry.config(state='disabled')
+
+        tk.Button(notes_row, text='Save Note', font=('Segoe UI', 8, 'bold'),
+                  bg='#238636', fg='white', activebackground='#2ea043',
+                  relief='flat', padx=10, cursor='hand2',
+                  command=self._save_notes).pack(side='right')
+
+    def _save_notes(self):
+        num = self._selected_number
+        if not num or num not in self.data:
+            return
+        note = self.notes_entry.get().strip()
+        self.data[num]['notes'] = note
+        save_data(self.data)
+        self._refresh_list()
+        self.info_lbl.config(text='Note saved & synced', fg='#3fb950')
+        threading.Thread(target=lambda: cloud_push(self.data), daemon=True).start()
+
+    def _load_notes_for_number(self, num):
+        info = self.data.get(num, {})
+        note = info.get('notes', '')
+        self.notes_entry.config(state='normal')
+        self.notes_entry.delete(0, 'end')
+        self.notes_entry.insert(0, note)
+
     def _get_slot_count(self, num):
         info = self.data.get(num, {})
         slots = info.get('email_slots', ['', '', '', ''])
@@ -506,6 +548,7 @@ class NicketsSMS:
         self.sms_text.insert('end', 'Loading messages...', 'hint')
         self.sms_text.config(state='disabled')
         self._load_slots_for_number(num)
+        self._load_notes_for_number(num)
 
         def do():
             self._poll_number(num)
@@ -645,27 +688,38 @@ class NicketsSMS:
         save_data(self.data)
 
     def _start_auto_poll(self):
-        def loop():
+        def cloud_loop():
             while True:
-                time.sleep(8)
+                time.sleep(5)
                 try:
-                    self.root.after(0, self.status_lbl.config, {'text': 'syncing...', 'fg': '#8b949e'})
                     remote = cloud_pull()
                     if remote:
                         cloud_merge(self.data, remote)
                         save_data(self.data)
-                    if self.numbers:
-                        for num in list(self.numbers):
-                            self._poll_number(num)
                     self.root.after(0, self._refresh_list)
                     if self._selected_number:
-                        self.root.after(0, lambda: self._show_sms(self._selected_number))
                         self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
-                    self.root.after(0, self.status_lbl.config,
-                                    {'text': 'live', 'fg': '#3fb950'})
+                        self.root.after(0, lambda: self._load_notes_for_number(self._selected_number))
                 except Exception:
                     pass
-        threading.Thread(target=loop, daemon=True).start()
+
+        def sms_loop():
+            while True:
+                time.sleep(10)
+                try:
+                    if self.numbers:
+                        self.root.after(0, self.status_lbl.config, {'text': 'checking SMS...', 'fg': '#8b949e'})
+                        for num in list(self.numbers):
+                            self._poll_number(num)
+                        self.root.after(0, self._refresh_list)
+                        if self._selected_number:
+                            self.root.after(0, lambda: self._show_sms(self._selected_number))
+                        self.root.after(0, self.status_lbl.config, {'text': 'live', 'fg': '#3fb950'})
+                except Exception:
+                    pass
+
+        threading.Thread(target=cloud_loop, daemon=True).start()
+        threading.Thread(target=sms_loop, daemon=True).start()
 
     def _manual_refresh(self):
         def do():
