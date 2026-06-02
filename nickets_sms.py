@@ -1,4 +1,4 @@
-"""Nickets SMS v4.0 - Simple Multi-VA"""
+"""Nickets SMS v5.0 - Number Slot Manager"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -7,7 +7,6 @@ import json
 import time
 import os
 import sys
-import base64 as _b64
 from urllib.request import Request, urlopen
 import re
 
@@ -15,7 +14,11 @@ import re
 
 _LOGIN_USER = 'Nickets@gmail.com'
 _LOGIN_PASS = 'NickNick#100'
-MAX_ACCOUNTS = 4
+SLOTS_PER_NUMBER = 4
+
+# TextVerified account
+_API_USER = 'chingmarkjohn12@gmail.com'
+_API_KEY = 'RT9tYFQIBajurTBrDuLzzfMfR1bmcOFRqsjDgTjw6tZPmdhRYOsFKeIDYFvwoZG'
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -26,7 +29,6 @@ else:
 
 DATA_DIR = os.path.join(BASE_DIR, 'NicketsSMS_Data')
 DATA_PATH = os.path.join(DATA_DIR, 'sms_data.json')
-ACCOUNTS_PATH = os.path.join(DATA_DIR, 'accounts.json')
 
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -45,29 +47,13 @@ def save_data(data):
     with open(DATA_PATH, 'w') as f:
         json.dump(data, f, indent=2)
 
-def load_accounts():
-    if os.path.exists(ACCOUNTS_PATH):
-        try:
-            with open(ACCOUNTS_PATH, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
-
-def save_accounts(accounts):
-    ensure_dirs()
-    with open(ACCOUNTS_PATH, 'w') as f:
-        json.dump(accounts, f, indent=2)
-
 # ─── TextVerified API ──────────────────────────────────────────────────────
 
 _UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 _TV_BASE = 'https://www.textverified.com'
 
 class API:
-    def __init__(self, username, api_key):
-        self._username = username
-        self._api_key = api_key
+    def __init__(self):
         self._token = None
         self._exp = 0
 
@@ -76,8 +62,8 @@ class API:
             return self._token, None
         try:
             req = Request(f'{_TV_BASE}/api/pub/v2/auth', data=b'', method='POST')
-            req.add_header('X-API-USERNAME', self._username)
-            req.add_header('X-API-KEY', self._api_key)
+            req.add_header('X-API-USERNAME', _API_USER)
+            req.add_header('X-API-KEY', _API_KEY)
             req.add_header('Content-Type', 'application/json')
             req.add_header('User-Agent', _UA)
             with urlopen(req, timeout=15) as resp:
@@ -191,32 +177,22 @@ class LoginWindow:
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v4.0')
+        self.root.title('Nickets SMS v5.0')
         self.root.geometry('920x580')
         self.root.minsize(800, 480)
         self.root.resizable(True, True)
         self.root.configure(bg='#0d1117')
 
         self.data = load_data()
-        self.accounts = load_accounts()
-        self.apis = []
+        self.api = API()
         self.numbers = []
         self._selected_number = None
-        self._acct_entries = []
+        self._slot_entries = []
 
-        self._init_apis()
         self._setup_styles()
         self._build_ui()
         self._load_numbers()
         self._start_auto_poll()
-
-    def _init_apis(self):
-        self.apis = []
-        for acct in self.accounts:
-            u = acct.get('username', '')
-            k = acct.get('api_key', '')
-            if u and k:
-                self.apis.append(API(u, k))
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -255,12 +231,14 @@ class NicketsSMS:
         tbl_frame = tk.Frame(left, bg='#0d1117')
         tbl_frame.pack(fill='both', expand=True)
 
-        cols = ('number', 'code')
+        cols = ('number', 'slots', 'code')
         self.tree = ttk.Treeview(tbl_frame, columns=cols, show='headings', height=20)
         self.tree.heading('number', text='Number')
+        self.tree.heading('slots', text='Status')
         self.tree.heading('code', text='Last Code')
-        self.tree.column('number', width=150, minwidth=120)
-        self.tree.column('code', width=90, minwidth=60)
+        self.tree.column('number', width=130, minwidth=110)
+        self.tree.column('slots', width=55, minwidth=45)
+        self.tree.column('code', width=80, minwidth=60)
 
         sb = ttk.Scrollbar(tbl_frame, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -283,7 +261,7 @@ class NicketsSMS:
                                  bg='#0d1117', fg='#8b949e')
         self.info_lbl.pack(side='right')
 
-        # RIGHT: SMS + Accounts
+        # RIGHT: SMS + Email Slots
         right = tk.Frame(main, bg='#0d1117')
         main.add(right, minsize=380)
 
@@ -316,85 +294,103 @@ class NicketsSMS:
         self.sms_text.tag_config('body', foreground='#e6edf3')
         self.sms_text.tag_config('hint', foreground='#8b949e')
 
-        # Accounts panel
-        acct_frame = tk.LabelFrame(right, text='  Accounts  ',
-                                    font=('Segoe UI', 9, 'bold'),
-                                    bg='#161b22', fg='#58a6ff',
-                                    highlightbackground='#30363d', highlightthickness=1,
-                                    relief='groove', bd=1)
-        acct_frame.pack(fill='x', pady=(0, 2))
+        # Email slots panel (per number)
+        slots_frame = tk.LabelFrame(right, text='  Email Slots  ',
+                                     font=('Segoe UI', 9, 'bold'),
+                                     bg='#161b22', fg='#58a6ff',
+                                     highlightbackground='#30363d', highlightthickness=1,
+                                     relief='groove', bd=1)
+        slots_frame.pack(fill='x', pady=(0, 2))
 
-        acct_top = tk.Frame(acct_frame, bg='#161b22')
-        acct_top.pack(fill='x', padx=8, pady=(4, 4))
+        slots_top = tk.Frame(slots_frame, bg='#161b22')
+        slots_top.pack(fill='x', padx=8, pady=(4, 4))
 
-        configured = len([a for a in self.accounts if a.get('username') and a.get('api_key')])
-        self.slots_lbl = tk.Label(acct_top, text=self._slots_text(configured),
-                                  font=('Segoe UI', 9, 'bold'), bg='#161b22',
-                                  fg='#f85149' if configured >= MAX_ACCOUNTS else '#3fb950')
-        self.slots_lbl.pack(side='left')
+        self.slots_status_lbl = tk.Label(slots_top, text='Select a number first',
+                                          font=('Segoe UI', 9, 'bold'),
+                                          bg='#161b22', fg='#8b949e')
+        self.slots_status_lbl.pack(side='left')
 
-        tk.Button(acct_top, text='Save', font=('Segoe UI', 8, 'bold'),
-                  bg='#238636', fg='white', activebackground='#2ea043',
-                  relief='flat', padx=10, pady=1, cursor='hand2',
-                  command=self._save_accounts).pack(side='right')
+        self._slot_entries = []
+        slots_grid = tk.Frame(slots_frame, bg='#161b22')
+        slots_grid.pack(fill='x', padx=8, pady=(0, 8))
 
-        self._acct_entries = []
-        acct_grid = tk.Frame(acct_frame, bg='#161b22')
-        acct_grid.pack(fill='x', padx=8, pady=(0, 8))
-
-        for i in range(MAX_ACCOUNTS):
-            acct = self.accounts[i] if i < len(self.accounts) else {}
-            row = tk.Frame(acct_grid, bg='#161b22')
+        for i in range(SLOTS_PER_NUMBER):
+            row = tk.Frame(slots_grid, bg='#161b22')
             row.pack(fill='x', pady=(0, 3))
 
-            has_creds = bool(acct.get('username') and acct.get('api_key'))
-            dot_color = '#3fb950' if has_creds else '#30363d'
             dot = tk.Label(row, text='*', font=('Segoe UI', 10),
-                          bg='#161b22', fg=dot_color)
+                          bg='#161b22', fg='#30363d')
             dot.pack(side='left', padx=(0, 4))
 
             tk.Label(row, text=f'{i+1}', font=('Consolas', 8, 'bold'),
                      bg='#161b22', fg='#58a6ff', width=2).pack(side='left')
 
-            e_user = tk.Entry(row, font=('Consolas', 8), bg='#0d1117', fg='#e6edf3',
-                              insertbackground='#e6edf3', relief='flat', width=22,
-                              highlightthickness=1, highlightbackground='#30363d')
-            e_user.pack(side='left', padx=(4, 3), ipady=1)
-            e_user.insert(0, acct.get('username', ''))
+            e = tk.Entry(row, font=('Consolas', 9), bg='#0d1117', fg='#e6edf3',
+                         insertbackground='#e6edf3', relief='flat',
+                         highlightthickness=1, highlightbackground='#30363d')
+            e.pack(side='left', fill='x', expand=True, padx=(4, 4), ipady=2)
 
-            e_key = tk.Entry(row, font=('Consolas', 8), bg='#0d1117', fg='#e6edf3',
-                             insertbackground='#e6edf3', relief='flat',
-                             highlightthickness=1, highlightbackground='#30363d')
-            e_key.pack(side='left', fill='x', expand=True, padx=(0, 0), ipady=1)
-            e_key.insert(0, acct.get('api_key', ''))
+            save_btn = tk.Button(row, text='Set', font=('Segoe UI', 7, 'bold'),
+                                  bg='#238636', fg='white', activebackground='#2ea043',
+                                  relief='flat', padx=8, cursor='hand2',
+                                  command=lambda idx=i: self._save_slot(idx))
+            save_btn.pack(side='right')
 
-            self._acct_entries.append((e_user, e_key, dot))
+            self._slot_entries.append((e, dot))
 
-    def _slots_text(self, configured):
-        txt = f'{configured}/{MAX_ACCOUNTS}'
-        if configured >= MAX_ACCOUNTS:
-            txt += '  FULL'
-        return txt
+    def _get_slot_count(self, num):
+        info = self.data.get(num, {})
+        slots = info.get('email_slots', ['', '', '', ''])
+        return len([s for s in slots if s.strip()])
 
-    def _save_accounts(self):
-        accounts = []
-        for e_user, e_key, dot in self._acct_entries:
-            u = e_user.get().strip()
-            k = e_key.get().strip()
-            has = bool(u and k)
-            dot.config(fg='#3fb950' if has else '#30363d')
-            if u or k:
-                accounts.append({'username': u, 'api_key': k})
-        save_accounts(accounts)
-        self.accounts = accounts
-        self._init_apis()
-        configured = len([a for a in accounts if a.get('username') and a.get('api_key')])
-        self.slots_lbl.config(
-            text=self._slots_text(configured),
-            fg='#f85149' if configured >= MAX_ACCOUNTS else '#3fb950'
-        )
-        self.info_lbl.config(text='Saved! Loading numbers...', fg='#3fb950')
-        self._manual_refresh()
+    def _get_slot_status(self, num):
+        count = self._get_slot_count(num)
+        if count >= SLOTS_PER_NUMBER:
+            return 'FULL'
+        return f'{count}/{SLOTS_PER_NUMBER}'
+
+    def _load_slots_for_number(self, num):
+        info = self.data.get(num, {})
+        slots = info.get('email_slots', ['', '', '', ''])
+        while len(slots) < SLOTS_PER_NUMBER:
+            slots.append('')
+        filled = 0
+        for i in range(SLOTS_PER_NUMBER):
+            e, dot = self._slot_entries[i]
+            e.config(state='normal')
+            e.delete(0, 'end')
+            e.insert(0, slots[i])
+            if slots[i].strip():
+                dot.config(fg='#3fb950')
+                filled += 1
+            else:
+                dot.config(fg='#30363d')
+        if filled >= SLOTS_PER_NUMBER:
+            self.slots_status_lbl.config(text='FULL', fg='#f85149')
+        else:
+            self.slots_status_lbl.config(text=f'{filled}/{SLOTS_PER_NUMBER} used', fg='#3fb950')
+
+    def _save_slot(self, slot_idx):
+        num = self._selected_number
+        if not num or num not in self.data:
+            return
+        info = self.data[num]
+        slots = info.get('email_slots', ['', '', '', ''])
+        while len(slots) < SLOTS_PER_NUMBER:
+            slots.append('')
+        e, dot = self._slot_entries[slot_idx]
+        email = e.get().strip()
+        slots[slot_idx] = email
+        info['email_slots'] = slots
+        save_data(self.data)
+        dot.config(fg='#3fb950' if email else '#30363d')
+        filled = len([s for s in slots if s.strip()])
+        if filled >= SLOTS_PER_NUMBER:
+            self.slots_status_lbl.config(text='FULL', fg='#f85149')
+        else:
+            self.slots_status_lbl.config(text=f'{filled}/{SLOTS_PER_NUMBER} used', fg='#3fb950')
+        self._refresh_list()
+        self.info_lbl.config(text=f'Slot {slot_idx+1} saved', fg='#3fb950')
 
     def _on_number_click(self):
         num = self._get_selected_number()
@@ -407,6 +403,7 @@ class NicketsSMS:
         self.sms_text.delete('1.0', 'end')
         self.sms_text.insert('end', 'Loading messages...', 'hint')
         self.sms_text.config(state='disabled')
+        self._load_slots_for_number(num)
 
         def do():
             self._poll_number(num)
@@ -456,29 +453,30 @@ class NicketsSMS:
     def _load_numbers_sync(self):
         self.numbers = []
         total = 0
-        for idx, api in enumerate(self.apis):
-            all_rentals = []
-            for ep in ('/api/pub/v2/reservations/rental/renewable',
-                       '/api/pub/v2/reservations/rental/nonrenewable'):
-                resp, err = api.call('GET', ep)
-                if err:
-                    continue
-                items = resp.get('data', []) if isinstance(resp, dict) else []
-                all_rentals.extend(items)
-            active = [r for r in all_rentals if 'active' in r.get('state', '').lower()]
-            for r in active:
-                raw = r.get('number', '')
-                phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
-                res_id = r.get('id', '')
-                if phone not in self.data:
-                    self.data[phone] = {'reservation_id': res_id, 'account_idx': idx,
-                                        'codes': [], 'messages': []}
-                else:
-                    self.data[phone]['reservation_id'] = res_id
-                    self.data[phone]['account_idx'] = idx
-                self.numbers.append(phone)
-                total += 1
-                self.root.after(0, self.count_lbl.config, {'text': f'{total} numbers'})
+        all_rentals = []
+        for ep in ('/api/pub/v2/reservations/rental/renewable',
+                   '/api/pub/v2/reservations/rental/nonrenewable'):
+            resp, err = self.api.call('GET', ep)
+            if err:
+                continue
+            items = resp.get('data', []) if isinstance(resp, dict) else []
+            all_rentals.extend(items)
+        active = [r for r in all_rentals if 'active' in r.get('state', '').lower()]
+        for r in active:
+            raw = r.get('number', '')
+            phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
+            res_id = r.get('id', '')
+            if phone not in self.data:
+                self.data[phone] = {'reservation_id': res_id,
+                                    'codes': [], 'messages': [],
+                                    'email_slots': ['', '', '', '']}
+            else:
+                self.data[phone]['reservation_id'] = res_id
+                if 'email_slots' not in self.data[phone]:
+                    self.data[phone]['email_slots'] = ['', '', '', '']
+            self.numbers.append(phone)
+            total += 1
+            self.root.after(0, self.count_lbl.config, {'text': f'{total} numbers'})
         save_data(self.data)
 
     def _refresh_list(self):
@@ -488,10 +486,11 @@ class NicketsSMS:
         sel_iid = None
         for num in self.numbers:
             info = self.data.get(num, {})
+            status = self._get_slot_status(num)
             code = ''
             if info.get('codes'):
                 code = info['codes'][-1].get('code', '')
-            iid = self.tree.insert('', 'end', values=(num, code))
+            iid = self.tree.insert('', 'end', values=(num, status, code))
             if num == sel_num:
                 sel_iid = iid
         if sel_iid:
@@ -514,11 +513,7 @@ class NicketsSMS:
         res_id = info.get('reservation_id', '')
         if not res_id:
             return
-        idx = info.get('account_idx', 0)
-        api = self.apis[idx] if 0 <= idx < len(self.apis) else (self.apis[0] if self.apis else None)
-        if not api:
-            return
-        resp, err = api.call('GET', f'/api/pub/v2/sms?reservationId={res_id}')
+        resp, err = self.api.call('GET', f'/api/pub/v2/sms?reservationId={res_id}')
         if err or not resp:
             return
         api_messages = resp.get('data', []) if isinstance(resp, dict) else []
@@ -551,6 +546,7 @@ class NicketsSMS:
                         self.root.after(0, self._refresh_list)
                         if self._selected_number:
                             self.root.after(0, lambda: self._show_sms(self._selected_number))
+                            self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
                         self.root.after(0, self.status_lbl.config,
                                         {'text': 'live', 'fg': '#3fb950'})
                 except Exception:
