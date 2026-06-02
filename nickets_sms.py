@@ -1,4 +1,4 @@
-"""Nickets SMS v5.1 - Number Slot Manager"""
+"""Nickets SMS v5.2 - Number Slot Manager (Cloud Sync)"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -19,6 +19,10 @@ SLOTS_PER_NUMBER = 4
 # TextVerified account
 _API_USER = 'chingmarkjohn12@gmail.com'
 _API_KEY = 'RT9tYFQIBajurTBrDuLzzfMfR1bmcOFRqsjDgTjw6tZPmdhRYOsFKeIDYFvwoZG'
+
+# Cloud sync for shared slot data
+_CLOUD_URL = 'https://jsonblob.com/api/jsonBlob/019e8818-776e-7f6e-a176-3dfdac6873d6'
+_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -47,9 +51,58 @@ def save_data(data):
     with open(DATA_PATH, 'w') as f:
         json.dump(data, f, indent=2)
 
+# ─── Cloud Sync (email slots + notes shared across all VAs) ───────────────
+
+def cloud_pull():
+    try:
+        req = Request(_CLOUD_URL, headers={'Accept': 'application/json',
+                      'User-Agent': _UA})
+        with urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return {}
+
+def cloud_push(data):
+    shared = {}
+    for num, info in data.items():
+        slots = info.get('email_slots', ['', '', '', ''])
+        notes = info.get('notes', '')
+        if any(s.strip() for s in slots) or notes.strip():
+            shared[num] = {'email_slots': slots, 'notes': notes}
+    try:
+        body = json.dumps(shared).encode()
+        req = Request(_CLOUD_URL, data=body, method='PUT',
+                      headers={'Content-Type': 'application/json',
+                               'Accept': 'application/json',
+                               'User-Agent': _UA})
+        urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+def cloud_merge(local_data, remote):
+    for num, rinfo in remote.items():
+        if num not in local_data:
+            local_data[num] = {'reservation_id': '', 'codes': [], 'messages': [],
+                               'email_slots': rinfo.get('email_slots', ['', '', '', '']),
+                               'notes': rinfo.get('notes', '')}
+        else:
+            local_slots = local_data[num].get('email_slots', ['', '', '', ''])
+            remote_slots = rinfo.get('email_slots', ['', '', '', ''])
+            merged = []
+            for i in range(SLOTS_PER_NUMBER):
+                ls = local_slots[i].strip() if i < len(local_slots) else ''
+                rs = remote_slots[i].strip() if i < len(remote_slots) else ''
+                merged.append(rs if rs else ls)
+            local_data[num]['email_slots'] = merged
+            rn = rinfo.get('notes', '').strip()
+            ln = local_data[num].get('notes', '').strip()
+            if rn:
+                local_data[num]['notes'] = rn
+            elif ln:
+                local_data[num]['notes'] = ln
+
 # ─── TextVerified API ──────────────────────────────────────────────────────
 
-_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
 _TV_BASE = 'https://www.textverified.com'
 
 class API:
@@ -177,7 +230,7 @@ class LoginWindow:
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v5.1')
+        self.root.title('Nickets SMS v5.2')
         self.root.geometry('980x580')
         self.root.minsize(860, 480)
         self.root.resizable(True, True)
@@ -394,7 +447,8 @@ class NicketsSMS:
         else:
             self.slots_status_lbl.config(text=f'{filled}/{SLOTS_PER_NUMBER} used', fg='#3fb950')
         self._refresh_list()
-        self.info_lbl.config(text=f'Slot {slot_idx+1} saved', fg='#3fb950')
+        self.info_lbl.config(text=f'Slot {slot_idx+1} saved & synced', fg='#3fb950')
+        threading.Thread(target=lambda: cloud_push(self.data), daemon=True).start()
 
     def _on_double_click_notes(self, event):
         region = self.tree.identify('region', event.x, event.y)
@@ -431,6 +485,7 @@ class NicketsSMS:
             if num in self.data:
                 self.data[num]['notes'] = new_val
                 save_data(self.data)
+                threading.Thread(target=lambda: cloud_push(self.data), daemon=True).start()
             entry.destroy()
             self._edit_widget = None
             self._refresh_list()
@@ -492,7 +547,11 @@ class NicketsSMS:
     def _load_numbers(self):
         def do():
             self.root.after(0, self.status_lbl.config, {'text': 'loading...', 'fg': '#8b949e'})
+            remote = cloud_pull()
+            if remote:
+                cloud_merge(self.data, remote)
             self._load_numbers_sync()
+            cloud_push(self.data)
             self.root.after(0, self._refresh_list)
             self.root.after(0, self.status_lbl.config, {'text': 'live', 'fg': '#3fb950'})
         threading.Thread(target=do, daemon=True).start()
@@ -590,16 +649,20 @@ class NicketsSMS:
             while True:
                 time.sleep(8)
                 try:
+                    self.root.after(0, self.status_lbl.config, {'text': 'syncing...', 'fg': '#8b949e'})
+                    remote = cloud_pull()
+                    if remote:
+                        cloud_merge(self.data, remote)
+                        save_data(self.data)
                     if self.numbers:
-                        self.root.after(0, self.status_lbl.config, {'text': 'checking...', 'fg': '#8b949e'})
                         for num in list(self.numbers):
                             self._poll_number(num)
-                        self.root.after(0, self._refresh_list)
-                        if self._selected_number:
-                            self.root.after(0, lambda: self._show_sms(self._selected_number))
-                            self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
-                        self.root.after(0, self.status_lbl.config,
-                                        {'text': 'live', 'fg': '#3fb950'})
+                    self.root.after(0, self._refresh_list)
+                    if self._selected_number:
+                        self.root.after(0, lambda: self._show_sms(self._selected_number))
+                        self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
+                    self.root.after(0, self.status_lbl.config,
+                                    {'text': 'live', 'fg': '#3fb950'})
                 except Exception:
                     pass
         threading.Thread(target=loop, daemon=True).start()
@@ -607,13 +670,18 @@ class NicketsSMS:
     def _manual_refresh(self):
         def do():
             self.root.after(0, self.info_lbl.config, {'text': 'Refreshing...', 'fg': '#8b949e'})
+            remote = cloud_pull()
+            if remote:
+                cloud_merge(self.data, remote)
             self._load_numbers_sync()
             for num in list(self.numbers):
                 self._poll_number(num)
+            cloud_push(self.data)
             self.root.after(0, self._refresh_list)
             if self._selected_number:
                 self.root.after(0, lambda: self._show_sms(self._selected_number))
-            self.root.after(0, self.info_lbl.config, {'text': 'Refreshed', 'fg': '#3fb950'})
+                self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
+            self.root.after(0, self.info_lbl.config, {'text': 'Synced', 'fg': '#3fb950'})
         threading.Thread(target=do, daemon=True).start()
 
     def _copy_code(self):
