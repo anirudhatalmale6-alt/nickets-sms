@@ -1,4 +1,4 @@
-"""Nickets SMS v5.0 - Number Slot Manager"""
+"""Nickets SMS v5.1 - Number Slot Manager"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -177,9 +177,9 @@ class LoginWindow:
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v5.0')
-        self.root.geometry('920x580')
-        self.root.minsize(800, 480)
+        self.root.title('Nickets SMS v5.1')
+        self.root.geometry('980x580')
+        self.root.minsize(860, 480)
         self.root.resizable(True, True)
         self.root.configure(bg='#0d1117')
 
@@ -223,7 +223,7 @@ class NicketsSMS:
 
         # LEFT: Number list
         left = tk.Frame(main, bg='#0d1117')
-        main.add(left, width=300, minsize=220)
+        main.add(left, width=360, minsize=280)
 
         tk.Label(left, text='Phone Numbers', font=('Segoe UI', 10, 'bold'),
                  bg='#0d1117', fg='#c9d1d9').pack(anchor='w', pady=(4, 4))
@@ -231,14 +231,16 @@ class NicketsSMS:
         tbl_frame = tk.Frame(left, bg='#0d1117')
         tbl_frame.pack(fill='both', expand=True)
 
-        cols = ('number', 'slots', 'code')
+        cols = ('number', 'slots', 'code', 'notes')
         self.tree = ttk.Treeview(tbl_frame, columns=cols, show='headings', height=20)
         self.tree.heading('number', text='Number')
         self.tree.heading('slots', text='Status')
         self.tree.heading('code', text='Last Code')
-        self.tree.column('number', width=130, minwidth=110)
-        self.tree.column('slots', width=55, minwidth=45)
-        self.tree.column('code', width=80, minwidth=60)
+        self.tree.heading('notes', text='Notes')
+        self.tree.column('number', width=120, minwidth=100)
+        self.tree.column('slots', width=50, minwidth=40)
+        self.tree.column('code', width=70, minwidth=50)
+        self.tree.column('notes', width=80, minwidth=60)
 
         sb = ttk.Scrollbar(tbl_frame, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -246,6 +248,8 @@ class NicketsSMS:
         sb.pack(side='right', fill='y')
 
         self.tree.bind('<<TreeviewSelect>>', lambda e: self._on_number_click())
+        self.tree.bind('<Double-1>', self._on_double_click_notes)
+        self._edit_widget = None
 
         left_btn = tk.Frame(left, bg='#0d1117')
         left_btn.pack(fill='x', pady=(4, 2))
@@ -392,6 +396,49 @@ class NicketsSMS:
         self._refresh_list()
         self.info_lbl.config(text=f'Slot {slot_idx+1} saved', fg='#3fb950')
 
+    def _on_double_click_notes(self, event):
+        region = self.tree.identify('region', event.x, event.y)
+        if region != 'cell':
+            return
+        col = self.tree.identify_column(event.x)
+        if col != '#4':
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        vals = self.tree.item(iid, 'values')
+        num = vals[0] if vals else None
+        if not num:
+            return
+        bbox = self.tree.bbox(iid, column='notes')
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        if self._edit_widget:
+            self._edit_widget.destroy()
+        entry = tk.Entry(self.tree, font=('Consolas', 9), bg='#0d1117',
+                         fg='#e6edf3', insertbackground='#e6edf3', relief='flat',
+                         highlightthickness=1, highlightbackground='#58a6ff')
+        entry.place(x=x, y=y, width=w, height=h)
+        current = self.data.get(num, {}).get('notes', '')
+        entry.insert(0, current)
+        entry.select_range(0, 'end')
+        entry.focus()
+        self._edit_widget = entry
+
+        def save(e=None):
+            new_val = entry.get().strip()
+            if num in self.data:
+                self.data[num]['notes'] = new_val
+                save_data(self.data)
+            entry.destroy()
+            self._edit_widget = None
+            self._refresh_list()
+
+        entry.bind('<Return>', save)
+        entry.bind('<FocusOut>', save)
+        entry.bind('<Escape>', lambda e: (entry.destroy(), setattr(self, '_edit_widget', None)))
+
     def _on_number_click(self):
         num = self._get_selected_number()
         if not num:
@@ -469,11 +516,14 @@ class NicketsSMS:
             if phone not in self.data:
                 self.data[phone] = {'reservation_id': res_id,
                                     'codes': [], 'messages': [],
-                                    'email_slots': ['', '', '', '']}
+                                    'email_slots': ['', '', '', ''],
+                                    'notes': ''}
             else:
                 self.data[phone]['reservation_id'] = res_id
                 if 'email_slots' not in self.data[phone]:
                     self.data[phone]['email_slots'] = ['', '', '', '']
+                if 'notes' not in self.data[phone]:
+                    self.data[phone]['notes'] = ''
             self.numbers.append(phone)
             total += 1
             self.root.after(0, self.count_lbl.config, {'text': f'{total} numbers'})
@@ -490,7 +540,8 @@ class NicketsSMS:
             code = ''
             if info.get('codes'):
                 code = info['codes'][-1].get('code', '')
-            iid = self.tree.insert('', 'end', values=(num, status, code))
+            notes = info.get('notes', '')
+            iid = self.tree.insert('', 'end', values=(num, status, code, notes))
             if num == sel_num:
                 sel_iid = iid
         if sel_iid:
