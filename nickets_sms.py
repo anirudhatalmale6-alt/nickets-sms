@@ -1,4 +1,4 @@
-"""Nickets SMS v3.1 - Cloud Synced, Zero-Config for VAs"""
+"""Nickets SMS v4.0 - Simple Multi-VA"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -9,15 +9,12 @@ import os
 import sys
 import base64 as _b64
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
 import re
-import uuid
 
 # ─── Config ─────────────────────────────────────────────────────────────────
 
 _LOGIN_USER = 'Nickets@gmail.com'
 _LOGIN_PASS = 'NickNick#100'
-_ADMIN_PASS = 'NickAdmin#100'
 MAX_ACCOUNTS = 4
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
@@ -29,22 +26,10 @@ else:
 
 DATA_DIR = os.path.join(BASE_DIR, 'NicketsSMS_Data')
 DATA_PATH = os.path.join(DATA_DIR, 'sms_data.json')
-INSTANCE_PATH = os.path.join(DATA_DIR, 'instance_id.txt')
+ACCOUNTS_PATH = os.path.join(DATA_DIR, 'accounts.json')
 
 def ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
-
-def get_instance_id():
-    ensure_dirs()
-    if os.path.exists(INSTANCE_PATH):
-        with open(INSTANCE_PATH, 'r') as f:
-            return f.read().strip()
-    iid = uuid.uuid4().hex[:8]
-    with open(INSTANCE_PATH, 'w') as f:
-        f.write(iid)
-    return iid
-
-INSTANCE_ID = get_instance_id()
 
 def load_data():
     if os.path.exists(DATA_PATH):
@@ -55,140 +40,24 @@ def load_data():
             pass
     return {}
 
-def save_data_local(data):
+def save_data(data):
     ensure_dirs()
     with open(DATA_PATH, 'w') as f:
         json.dump(data, f, indent=2)
 
-# ─── Cloud Sync (GitHub) ───────────────────────────────────────────────────
-
-_SYNC_REPO = 'anirudhatalmale6-alt/mlm-sms-sheet'
-_SYNC_KEY = 0x5A
-_SYNC_DATA = 'PTIqBSkYbyIUMR8eHTk4EQsKHwgPOCxsMRkgABMpNW0XPWlqMippNQ=='
-_SYNC_SMS_FILE = 'cloud_sms.json'
-_SYNC_ACCOUNTS_FILE = 'cloud_accounts.json'
-
-def _get_sync_token():
-    return bytes(b ^ _SYNC_KEY for b in _b64.b64decode(_SYNC_DATA)).decode()
-
-def _sync_headers():
-    return {
-        'Authorization': f'token {_get_sync_token()}',
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'NicketsSMS',
-    }
-
-def _cloud_read(filename):
-    try:
-        url = f'https://api.github.com/repos/{_SYNC_REPO}/contents/{filename}'
-        req = Request(url, headers=_sync_headers())
-        with urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
-        content = _b64.b64decode(result.get('content', '')).decode()
-        sha = result.get('sha', '')
-        return json.loads(content), sha, None
-    except HTTPError as e:
-        if e.code == 404:
-            return {}, '', None
-        return None, '', str(e)
-    except Exception as e:
-        return None, '', str(e)
-
-def _cloud_write(filename, data, old_sha=''):
-    try:
-        content = json.dumps(data, indent=2)
-        encoded = _b64.b64encode(content.encode()).decode()
-        url = f'https://api.github.com/repos/{_SYNC_REPO}/contents/{filename}'
-        payload = {'message': f'sync {INSTANCE_ID}', 'content': encoded}
-        if old_sha:
-            payload['sha'] = old_sha
-        body = json.dumps(payload).encode()
-        req = Request(url, data=body, headers=_sync_headers(), method='PUT')
-        req.add_header('Content-Type', 'application/json')
-        with urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
-        return result.get('content', {}).get('sha', ''), None
-    except HTTPError as e:
-        if e.code in (409, 422):
-            return '', 'conflict'
-        return '', str(e)
-    except Exception as e:
-        return '', str(e)
-
-# ─── Cloud Accounts ─────────────────────────────────────────────────────────
-
-_acct_sha = ''
-
-def cloud_load_accounts():
-    global _acct_sha
-    data, sha, err = _cloud_read(_SYNC_ACCOUNTS_FILE)
-    if err:
-        return None
-    _acct_sha = sha
-    if isinstance(data, dict):
-        return data.get('accounts', [])
+def load_accounts():
+    if os.path.exists(ACCOUNTS_PATH):
+        try:
+            with open(ACCOUNTS_PATH, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
     return []
 
-def cloud_save_accounts(accounts):
-    global _acct_sha
-    data = {'accounts': accounts}
-    new_sha, err = _cloud_write(_SYNC_ACCOUNTS_FILE, data, _acct_sha)
-    if err == 'conflict':
-        _, sha2, _ = _cloud_read(_SYNC_ACCOUNTS_FILE)
-        _acct_sha = sha2
-        new_sha, err = _cloud_write(_SYNC_ACCOUNTS_FILE, data, _acct_sha)
-    if not err:
-        _acct_sha = new_sha
-        return True
-    return False
-
-# ─── Cloud SMS Sync ─────────────────────────────────────────────────────────
-
-_sms_sha = ''
-_sms_lock = threading.Lock()
-
-def merge_sms(local, cloud):
-    merged = dict(cloud) if cloud else {}
-    for num, info in (local or {}).items():
-        if num not in merged:
-            merged[num] = info
-        else:
-            cloud_info = merged[num]
-            local_msgs = len(info.get('messages', []))
-            cloud_msgs = len(cloud_info.get('messages', []))
-            if local_msgs > cloud_msgs:
-                merged[num] = info
-            elif local_msgs == cloud_msgs:
-                local_codes = len(info.get('codes', []))
-                cloud_codes = len(cloud_info.get('codes', []))
-                if local_codes > cloud_codes:
-                    merged[num] = info
-    return merged
-
-def cloud_sync_sms(local_data):
-    global _sms_sha
-    with _sms_lock:
-        cloud_data, sha, err = _cloud_read(_SYNC_SMS_FILE)
-        if err:
-            return local_data, False
-        if cloud_data is None:
-            cloud_data = {}
-        _sms_sha = sha
-        merged = merge_sms(local_data, cloud_data)
-        if merged != cloud_data:
-            new_sha, push_err = _cloud_write(_SYNC_SMS_FILE, merged, _sms_sha)
-            if push_err == 'conflict':
-                cloud_data2, sha2, _ = _cloud_read(_SYNC_SMS_FILE)
-                if cloud_data2:
-                    _sms_sha = sha2
-                    merged = merge_sms(local_data, cloud_data2)
-                    new_sha, push_err = _cloud_write(_SYNC_SMS_FILE, merged, _sms_sha)
-                    if not push_err:
-                        _sms_sha = new_sha
-            elif not push_err:
-                _sms_sha = new_sha
-        save_data_local(merged)
-        return merged, True
+def save_accounts(accounts):
+    ensure_dirs()
+    with open(ACCOUNTS_PATH, 'w') as f:
+        json.dump(accounts, f, indent=2)
 
 # ─── TextVerified API ──────────────────────────────────────────────────────
 
@@ -253,7 +122,7 @@ def extract_code(body):
             return m.group(1)
     return ''
 
-# ─── Login Window ───────────────────────────────────────────────────────────
+# ─── Login ──────────────────────────────────────────────────────────────────
 
 class LoginWindow:
     def __init__(self):
@@ -290,11 +159,10 @@ class LoginWindow:
                                    highlightcolor='#58a6ff', highlightbackground='#30363d')
         self.pass_entry.pack(fill='x', pady=(2, 16), ipady=4)
 
-        self.login_btn = tk.Button(form, text='Login', font=('Segoe UI', 10, 'bold'),
-                                   bg='#238636', fg='white', activebackground='#2ea043',
-                                   relief='flat', cursor='hand2', pady=6,
-                                   command=self._do_login)
-        self.login_btn.pack(fill='x')
+        tk.Button(form, text='Login', font=('Segoe UI', 10, 'bold'),
+                  bg='#238636', fg='white', activebackground='#2ea043',
+                  relief='flat', cursor='hand2', pady=6,
+                  command=self._do_login).pack(fill='x')
 
         self.err_lbl = tk.Label(self.root, text='', font=('Segoe UI', 8),
                                 bg='#0d1117', fg='#f85149')
@@ -318,167 +186,29 @@ class LoginWindow:
         self.root.mainloop()
         return self.authenticated
 
-# ─── Admin Window (for boss to configure accounts) ─────────────────────────
-
-class AdminWindow:
-    def __init__(self, parent, accounts, on_save):
-        self.win = tk.Toplevel(parent)
-        self.win.title('Admin - Account Setup')
-        self.win.geometry('520x400')
-        self.win.configure(bg='#0d1117')
-        self.win.transient(parent)
-        self.win.grab_set()
-        self.accounts = list(accounts)
-        self.on_save = on_save
-        self.entries = []
-
-        pw_frame = tk.Frame(self.win, bg='#0d1117')
-        pw_frame.pack(fill='x', padx=20, pady=(16, 0))
-        tk.Label(pw_frame, text='Admin Password:', font=('Segoe UI', 9),
-                 bg='#0d1117', fg='#c9d1d9').pack(side='left')
-        self.pw_entry = tk.Entry(pw_frame, font=('Consolas', 10), bg='#161b22',
-                                  fg='#e6edf3', insertbackground='#e6edf3',
-                                  relief='flat', show='*', width=20,
-                                  highlightthickness=1, highlightbackground='#30363d')
-        self.pw_entry.pack(side='left', padx=(8, 8), ipady=2)
-        self.unlock_btn = tk.Button(pw_frame, text='Unlock', font=('Segoe UI', 9, 'bold'),
-                                     bg='#238636', fg='white', relief='flat', padx=10,
-                                     command=self._unlock)
-        self.unlock_btn.pack(side='left')
-        self.pw_err = tk.Label(pw_frame, text='', font=('Segoe UI', 8),
-                                bg='#0d1117', fg='#f85149')
-        self.pw_err.pack(side='left', padx=(8, 0))
-
-        self.pw_entry.bind('<Return>', lambda e: self._unlock())
-
-        self.content_frame = tk.Frame(self.win, bg='#0d1117')
-        self.content_frame.pack(fill='both', expand=True, padx=20, pady=(10, 14))
-
-        self._locked = True
-
-    def _unlock(self):
-        if self.pw_entry.get().strip() == _ADMIN_PASS:
-            self._locked = False
-            self.pw_entry.config(state='disabled')
-            self.unlock_btn.config(state='disabled', text='Unlocked')
-            self.pw_err.config(text='')
-            self._build_accounts()
-        else:
-            self.pw_err.config(text='Wrong password')
-
-    def _build_accounts(self):
-        for w in self.content_frame.winfo_children():
-            w.destroy()
-
-        tk.Label(self.content_frame, text='TextVerified Accounts',
-                 font=('Segoe UI', 12, 'bold'),
-                 bg='#0d1117', fg='#58a6ff').pack(pady=(0, 8))
-
-        configured = len([a for a in self.accounts if a.get('username') and a.get('api_key')])
-        status = f'{configured}/{MAX_ACCOUNTS}'
-        if configured >= MAX_ACCOUNTS:
-            status += '  FULL'
-        tk.Label(self.content_frame, text=status, font=('Segoe UI', 10, 'bold'),
-                 bg='#0d1117',
-                 fg='#f85149' if configured >= MAX_ACCOUNTS else '#3fb950').pack(pady=(0, 8))
-
-        self.entries = []
-        for i in range(MAX_ACCOUNTS):
-            acct = self.accounts[i] if i < len(self.accounts) else {}
-            frame = tk.Frame(self.content_frame, bg='#161b22',
-                             highlightbackground='#30363d', highlightthickness=1)
-            frame.pack(fill='x', pady=(0, 6))
-
-            row = tk.Frame(frame, bg='#161b22')
-            row.pack(fill='x', padx=8, pady=6)
-
-            tk.Label(row, text=f'Acct {i+1}', font=('Consolas', 9, 'bold'),
-                     bg='#161b22', fg='#58a6ff', width=6).pack(side='left')
-
-            e_user = tk.Entry(row, font=('Consolas', 9), bg='#0d1117', fg='#e6edf3',
-                              insertbackground='#e6edf3', relief='flat', width=24,
-                              highlightthickness=1, highlightbackground='#30363d')
-            e_user.pack(side='left', padx=(4, 4), ipady=2)
-            e_user.insert(0, acct.get('username', ''))
-
-            e_key = tk.Entry(row, font=('Consolas', 9), bg='#0d1117', fg='#e6edf3',
-                             insertbackground='#e6edf3', relief='flat',
-                             highlightthickness=1, highlightbackground='#30363d')
-            e_key.pack(side='left', fill='x', expand=True, ipady=2)
-            e_key.insert(0, acct.get('api_key', ''))
-
-            self.entries.append((e_user, e_key))
-
-        btn_frame = tk.Frame(self.content_frame, bg='#0d1117')
-        btn_frame.pack(fill='x', pady=(8, 0))
-        self.save_status = tk.Label(btn_frame, text='', font=('Segoe UI', 8),
-                                     bg='#0d1117', fg='#8b949e')
-        self.save_status.pack(side='left')
-        tk.Button(btn_frame, text='Save to Cloud', font=('Segoe UI', 10, 'bold'),
-                  bg='#238636', fg='white', activebackground='#2ea043',
-                  relief='flat', padx=16, pady=4, cursor='hand2',
-                  command=self._save).pack(side='right')
-
-    def _save(self):
-        accounts = []
-        for e_user, e_key in self.entries:
-            u = e_user.get().strip()
-            k = e_key.get().strip()
-            if u or k:
-                accounts.append({'username': u, 'api_key': k})
-        self.save_status.config(text='Saving to cloud...', fg='#d29922')
-        self.win.update()
-
-        def do():
-            ok = cloud_save_accounts(accounts)
-            self.win.after(0, lambda: self._on_saved(ok, accounts))
-        threading.Thread(target=do, daemon=True).start()
-
-    def _on_saved(self, ok, accounts):
-        if ok:
-            self.save_status.config(text='Saved! All VAs will get this automatically.', fg='#3fb950')
-            self.on_save(accounts)
-        else:
-            self.save_status.config(text='Failed to save. Try again.', fg='#f85149')
-
 # ─── Main App ───────────────────────────────────────────────────────────────
 
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v3.1')
+        self.root.title('Nickets SMS v4.0')
         self.root.geometry('920x580')
         self.root.minsize(800, 480)
         self.root.resizable(True, True)
         self.root.configure(bg='#0d1117')
 
         self.data = load_data()
-        self.accounts = []
+        self.accounts = load_accounts()
         self.apis = []
         self.numbers = []
-        self._number_account_map = {}
         self._selected_number = None
+        self._acct_entries = []
 
+        self._init_apis()
         self._setup_styles()
         self._build_ui()
-
-        # Load accounts from cloud first, then start
-        threading.Thread(target=self._initial_load, daemon=True).start()
-
-    def _initial_load(self):
-        self.root.after(0, self.sync_lbl.config,
-                        {'text': 'CLOUD: loading accounts...', 'fg': '#d29922'})
-        cloud_accts = cloud_load_accounts()
-        if cloud_accts:
-            self.accounts = cloud_accts
-        self._init_apis()
-        self.root.after(0, self._update_acct_display)
-        self._load_numbers_sync()
-        self.root.after(0, self._refresh_list)
-        self.root.after(0, self.sync_lbl.config,
-                        {'text': 'CLOUD: connected', 'fg': '#3fb950'})
+        self._load_numbers()
         self._start_auto_poll()
-        self._start_cloud_sync()
 
     def _init_apis(self):
         self.apis = []
@@ -503,43 +233,12 @@ class NicketsSMS:
         hdr.pack(fill='x', padx=10, pady=(8, 4))
         tk.Label(hdr, text='Nickets SMS', font=('Segoe UI', 14, 'bold'),
                  bg='#0d1117', fg='#58a6ff').pack(side='left')
-
-        self.sync_lbl = tk.Label(hdr, text='CLOUD: connecting...',
-                                 font=('Segoe UI', 8, 'bold'),
-                                 bg='#0d1117', fg='#d29922')
-        self.sync_lbl.pack(side='left', padx=(10, 0))
-
         self.status_lbl = tk.Label(hdr, text='', font=('Segoe UI', 8),
                                    bg='#0d1117', fg='#8b949e')
         self.status_lbl.pack(side='right')
         self.count_lbl = tk.Label(hdr, text='0 numbers', font=('Segoe UI', 9, 'bold'),
                                   bg='#0d1117', fg='#3fb950')
         self.count_lbl.pack(side='right', padx=(0, 12))
-
-        # Account status bar
-        acct_bar = tk.Frame(self.root, bg='#0d1117')
-        acct_bar.pack(fill='x', padx=10, pady=(0, 4))
-
-        self.acct_dots = []
-        for i in range(MAX_ACCOUNTS):
-            f = tk.Frame(acct_bar, bg='#0d1117')
-            f.pack(side='left', padx=(0, 12))
-            dot = tk.Label(f, text='*', font=('Segoe UI', 9),
-                          bg='#0d1117', fg='#30363d')
-            dot.pack(side='left', padx=(0, 3))
-            lbl = tk.Label(f, text=f'Slot {i+1}: empty', font=('Segoe UI', 8),
-                           bg='#0d1117', fg='#484f58')
-            lbl.pack(side='left')
-            self.acct_dots.append((dot, lbl))
-
-        self.full_lbl = tk.Label(acct_bar, text='', font=('Segoe UI', 9, 'bold'),
-                                 bg='#0d1117', fg='#f85149')
-        self.full_lbl.pack(side='right')
-
-        tk.Button(acct_bar, text='Admin', font=('Segoe UI', 7),
-                  bg='#21262d', fg='#8b949e', activebackground='#30363d',
-                  relief='flat', padx=8, pady=1, cursor='hand2',
-                  command=self._open_admin).pack(side='right', padx=(0, 8))
 
         # Main split
         main = tk.PanedWindow(self.root, orient='horizontal', bg='#30363d',
@@ -548,12 +247,10 @@ class NicketsSMS:
 
         # LEFT: Number list
         left = tk.Frame(main, bg='#0d1117')
-        main.add(left, width=320, minsize=240)
+        main.add(left, width=300, minsize=220)
 
-        left_hdr = tk.Frame(left, bg='#0d1117')
-        left_hdr.pack(fill='x', pady=(4, 4))
-        tk.Label(left_hdr, text='Phone Numbers', font=('Segoe UI', 10, 'bold'),
-                 bg='#0d1117', fg='#c9d1d9').pack(side='left')
+        tk.Label(left, text='Phone Numbers', font=('Segoe UI', 10, 'bold'),
+                 bg='#0d1117', fg='#c9d1d9').pack(anchor='w', pady=(4, 4))
 
         tbl_frame = tk.Frame(left, bg='#0d1117')
         tbl_frame.pack(fill='both', expand=True)
@@ -563,7 +260,7 @@ class NicketsSMS:
         self.tree.heading('number', text='Number')
         self.tree.heading('code', text='Last Code')
         self.tree.column('number', width=150, minwidth=120)
-        self.tree.column('code', width=100, minwidth=70)
+        self.tree.column('code', width=90, minwidth=60)
 
         sb = ttk.Scrollbar(tbl_frame, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
@@ -586,16 +283,17 @@ class NicketsSMS:
                                  bg='#0d1117', fg='#8b949e')
         self.info_lbl.pack(side='right')
 
-        # RIGHT: SMS view
+        # RIGHT: SMS + Accounts
         right = tk.Frame(main, bg='#0d1117')
-        main.add(right, minsize=350)
+        main.add(right, minsize=380)
 
+        # SMS panel
         sms_frame = tk.LabelFrame(right, text='  SMS Messages  ',
                                    font=('Segoe UI', 9, 'bold'),
                                    bg='#161b22', fg='#58a6ff',
                                    highlightbackground='#30363d', highlightthickness=1,
                                    relief='groove', bd=1)
-        sms_frame.pack(fill='both', expand=True, pady=(4, 2))
+        sms_frame.pack(fill='both', expand=True, pady=(4, 6))
 
         self.sms_hdr = tk.Frame(sms_frame, bg='#161b22')
         self.sms_hdr.pack(fill='x', padx=8, pady=(6, 4))
@@ -618,34 +316,84 @@ class NicketsSMS:
         self.sms_text.tag_config('body', foreground='#e6edf3')
         self.sms_text.tag_config('hint', foreground='#8b949e')
 
-    def _update_acct_display(self):
-        configured = 0
+        # Accounts panel
+        acct_frame = tk.LabelFrame(right, text='  Accounts  ',
+                                    font=('Segoe UI', 9, 'bold'),
+                                    bg='#161b22', fg='#58a6ff',
+                                    highlightbackground='#30363d', highlightthickness=1,
+                                    relief='groove', bd=1)
+        acct_frame.pack(fill='x', pady=(0, 2))
+
+        acct_top = tk.Frame(acct_frame, bg='#161b22')
+        acct_top.pack(fill='x', padx=8, pady=(4, 4))
+
+        configured = len([a for a in self.accounts if a.get('username') and a.get('api_key')])
+        self.slots_lbl = tk.Label(acct_top, text=self._slots_text(configured),
+                                  font=('Segoe UI', 9, 'bold'), bg='#161b22',
+                                  fg='#f85149' if configured >= MAX_ACCOUNTS else '#3fb950')
+        self.slots_lbl.pack(side='left')
+
+        tk.Button(acct_top, text='Save', font=('Segoe UI', 8, 'bold'),
+                  bg='#238636', fg='white', activebackground='#2ea043',
+                  relief='flat', padx=10, pady=1, cursor='hand2',
+                  command=self._save_accounts).pack(side='right')
+
+        self._acct_entries = []
+        acct_grid = tk.Frame(acct_frame, bg='#161b22')
+        acct_grid.pack(fill='x', padx=8, pady=(0, 8))
+
         for i in range(MAX_ACCOUNTS):
-            dot, lbl = self.acct_dots[i]
-            if i < len(self.accounts):
-                acct = self.accounts[i]
-                if acct.get('username') and acct.get('api_key'):
-                    configured += 1
-                    email = acct['username']
-                    short = email[:12] + '...' if len(email) > 15 else email
-                    dot.config(fg='#3fb950')
-                    lbl.config(text=f'Slot {i+1}: {short}', fg='#8b949e')
-                    continue
-            dot.config(fg='#30363d')
-            lbl.config(text=f'Slot {i+1}: empty', fg='#484f58')
+            acct = self.accounts[i] if i < len(self.accounts) else {}
+            row = tk.Frame(acct_grid, bg='#161b22')
+            row.pack(fill='x', pady=(0, 3))
 
+            has_creds = bool(acct.get('username') and acct.get('api_key'))
+            dot_color = '#3fb950' if has_creds else '#30363d'
+            dot = tk.Label(row, text='*', font=('Segoe UI', 10),
+                          bg='#161b22', fg=dot_color)
+            dot.pack(side='left', padx=(0, 4))
+
+            tk.Label(row, text=f'{i+1}', font=('Consolas', 8, 'bold'),
+                     bg='#161b22', fg='#58a6ff', width=2).pack(side='left')
+
+            e_user = tk.Entry(row, font=('Consolas', 8), bg='#0d1117', fg='#e6edf3',
+                              insertbackground='#e6edf3', relief='flat', width=22,
+                              highlightthickness=1, highlightbackground='#30363d')
+            e_user.pack(side='left', padx=(4, 3), ipady=1)
+            e_user.insert(0, acct.get('username', ''))
+
+            e_key = tk.Entry(row, font=('Consolas', 8), bg='#0d1117', fg='#e6edf3',
+                             insertbackground='#e6edf3', relief='flat',
+                             highlightthickness=1, highlightbackground='#30363d')
+            e_key.pack(side='left', fill='x', expand=True, padx=(0, 0), ipady=1)
+            e_key.insert(0, acct.get('api_key', ''))
+
+            self._acct_entries.append((e_user, e_key, dot))
+
+    def _slots_text(self, configured):
+        txt = f'{configured}/{MAX_ACCOUNTS}'
         if configured >= MAX_ACCOUNTS:
-            self.full_lbl.config(text='FULL')
-        else:
-            self.full_lbl.config(text=f'{configured}/{MAX_ACCOUNTS}')
+            txt += '  FULL'
+        return txt
 
-    def _open_admin(self):
-        AdminWindow(self.root, self.accounts, self._on_admin_save)
-
-    def _on_admin_save(self, new_accounts):
-        self.accounts = new_accounts
+    def _save_accounts(self):
+        accounts = []
+        for e_user, e_key, dot in self._acct_entries:
+            u = e_user.get().strip()
+            k = e_key.get().strip()
+            has = bool(u and k)
+            dot.config(fg='#3fb950' if has else '#30363d')
+            if u or k:
+                accounts.append({'username': u, 'api_key': k})
+        save_accounts(accounts)
+        self.accounts = accounts
         self._init_apis()
-        self._update_acct_display()
+        configured = len([a for a in accounts if a.get('username') and a.get('api_key')])
+        self.slots_lbl.config(
+            text=self._slots_text(configured),
+            fg='#f85149' if configured >= MAX_ACCOUNTS else '#3fb950'
+        )
+        self.info_lbl.config(text='Saved! Loading numbers...', fg='#3fb950')
         self._manual_refresh()
 
     def _on_number_click(self):
@@ -696,6 +444,42 @@ class NicketsSMS:
                 self.sms_text.insert('end', f'{body}\n\n', 'body')
 
         self.sms_text.config(state='disabled')
+
+    def _load_numbers(self):
+        def do():
+            self.root.after(0, self.status_lbl.config, {'text': 'loading...', 'fg': '#8b949e'})
+            self._load_numbers_sync()
+            self.root.after(0, self._refresh_list)
+            self.root.after(0, self.status_lbl.config, {'text': 'live', 'fg': '#3fb950'})
+        threading.Thread(target=do, daemon=True).start()
+
+    def _load_numbers_sync(self):
+        self.numbers = []
+        total = 0
+        for idx, api in enumerate(self.apis):
+            all_rentals = []
+            for ep in ('/api/pub/v2/reservations/rental/renewable',
+                       '/api/pub/v2/reservations/rental/nonrenewable'):
+                resp, err = api.call('GET', ep)
+                if err:
+                    continue
+                items = resp.get('data', []) if isinstance(resp, dict) else []
+                all_rentals.extend(items)
+            active = [r for r in all_rentals if 'active' in r.get('state', '').lower()]
+            for r in active:
+                raw = r.get('number', '')
+                phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
+                res_id = r.get('id', '')
+                if phone not in self.data:
+                    self.data[phone] = {'reservation_id': res_id, 'account_idx': idx,
+                                        'codes': [], 'messages': []}
+                else:
+                    self.data[phone]['reservation_id'] = res_id
+                    self.data[phone]['account_idx'] = idx
+                self.numbers.append(phone)
+                total += 1
+                self.root.after(0, self.count_lbl.config, {'text': f'{total} numbers'})
+        save_data(self.data)
 
     def _refresh_list(self):
         sel_num = self._get_selected_number()
@@ -753,37 +537,7 @@ class NicketsSMS:
                 codes.append({'code': code, 'time': ts, 'body': body})
         info['messages'] = messages
         info['codes'] = codes
-        save_data_local(self.data)
-
-    def _load_numbers_sync(self):
-        self.numbers = []
-        self._number_account_map = {}
-        for idx, api in enumerate(self.apis):
-            all_rentals = []
-            for ep in ('/api/pub/v2/reservations/rental/renewable',
-                       '/api/pub/v2/reservations/rental/nonrenewable'):
-                resp, err = api.call('GET', ep)
-                if err:
-                    continue
-                items = resp.get('data', []) if isinstance(resp, dict) else []
-                all_rentals.extend(items)
-            active = [r for r in all_rentals if 'active' in r.get('state', '').lower()]
-            for r in active:
-                raw = r.get('number', '')
-                phone = f'+1{raw}' if len(raw) == 10 and not raw.startswith('+') else raw
-                res_id = r.get('id', '')
-                if phone not in self.data:
-                    self.data[phone] = {'reservation_id': res_id, 'account_idx': idx,
-                                        'codes': [], 'messages': []}
-                else:
-                    self.data[phone]['reservation_id'] = res_id
-                    self.data[phone]['account_idx'] = idx
-                self.numbers.append(phone)
-                self._number_account_map[phone] = idx
-        save_data_local(self.data)
-        n = len(self.numbers)
-        self.root.after(0, self.count_lbl.config,
-                        {'text': f'{n} number{"s" if n != 1 else ""}'})
+        save_data(self.data)
 
     def _start_auto_poll(self):
         def loop():
@@ -803,53 +557,12 @@ class NicketsSMS:
                     pass
         threading.Thread(target=loop, daemon=True).start()
 
-    def _start_cloud_sync(self):
-        def loop():
-            while True:
-                try:
-                    # Sync SMS data
-                    self.data, ok = cloud_sync_sms(self.data)
-                    if ok:
-                        # Include cloud-only numbers
-                        cloud_nums = set(self.data.keys()) - set(self._number_account_map.keys())
-                        local_nums = [n for n in self.numbers if n in self._number_account_map]
-                        self.numbers = local_nums + sorted(cloud_nums)
-                        self.root.after(0, self._refresh_list)
-                        if self._selected_number:
-                            self.root.after(0, lambda: self._show_sms(self._selected_number))
-                        self.root.after(0, self.sync_lbl.config,
-                                        {'text': 'CLOUD: synced', 'fg': '#3fb950'})
-
-                    # Check for account updates from admin
-                    cloud_accts = cloud_load_accounts()
-                    if cloud_accts is not None and cloud_accts != self.accounts:
-                        self.accounts = cloud_accts
-                        self._init_apis()
-                        self.root.after(0, self._update_acct_display)
-                        self._load_numbers_sync()
-                        self.root.after(0, self._refresh_list)
-
-                    if not ok:
-                        self.root.after(0, self.sync_lbl.config,
-                                        {'text': 'CLOUD: offline', 'fg': '#f85149'})
-                except Exception:
-                    self.root.after(0, self.sync_lbl.config,
-                                    {'text': 'CLOUD: error', 'fg': '#f85149'})
-                time.sleep(10)
-        threading.Thread(target=loop, daemon=True).start()
-
     def _manual_refresh(self):
         def do():
             self.root.after(0, self.info_lbl.config, {'text': 'Refreshing...', 'fg': '#8b949e'})
-            cloud_accts = cloud_load_accounts()
-            if cloud_accts is not None:
-                self.accounts = cloud_accts
-                self._init_apis()
-                self.root.after(0, self._update_acct_display)
             self._load_numbers_sync()
             for num in list(self.numbers):
                 self._poll_number(num)
-            self.data, _ = cloud_sync_sms(self.data)
             self.root.after(0, self._refresh_list)
             if self._selected_number:
                 self.root.after(0, lambda: self._show_sms(self._selected_number))
