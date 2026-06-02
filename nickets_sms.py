@@ -17,10 +17,7 @@ _LOGIN_USER = 'Nickets@gmail.com'
 _LOGIN_PASS = 'NickNick#100'
 MAX_ACCOUNTS = 4
 
-_DEFAULT_ACCOUNTS = [
-    {'username': 'chingmarkjohn12@gmail.com',
-     'api_key': 'RT9tYFQIBajurTBrDuLzzfMfR1bmcOFRqsjDgTjw6tZPmdhRYOsFKeIDYFvwoZG'},
-]
+_DEFAULT_ACCOUNTS = []
 
 # ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -55,13 +52,10 @@ def load_accounts():
     if os.path.exists(ACCOUNTS_PATH):
         try:
             with open(ACCOUNTS_PATH, 'r') as f:
-                accts = json.load(f)
-            if accts:
-                return accts
+                return json.load(f)
         except Exception:
             pass
-    save_accounts(_DEFAULT_ACCOUNTS)
-    return list(_DEFAULT_ACCOUNTS)
+    return []
 
 def save_accounts(accounts):
     ensure_dirs()
