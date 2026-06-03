@@ -1,4 +1,4 @@
-"""Nickets SMS v5.3 - Number Slot Manager (Real-Time Cloud Sync)"""
+"""Nickets SMS v6.0 - Number Slot Manager (Real-Time Cloud Sync + Usage Tracking)"""
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -15,6 +15,7 @@ import re
 _LOGIN_USER = 'Nickets@gmail.com'
 _LOGIN_PASS = 'NickNick#100'
 SLOTS_PER_NUMBER = 4
+USAGE_TYPES = ['Creation', 'Recovery', 'Re-verification']
 
 # TextVerified account
 _API_USER = 'chingmarkjohn12@gmail.com'
@@ -51,7 +52,7 @@ def save_data(data):
     with open(DATA_PATH, 'w') as f:
         json.dump(data, f, indent=2)
 
-# ─── Cloud Sync (email slots + notes shared across all VAs) ───────────────
+# ─── Cloud Sync (email slots + notes + usage shared across all VAs) ───────
 
 def cloud_pull():
     try:
@@ -67,8 +68,11 @@ def cloud_push(data):
     for num, info in data.items():
         slots = info.get('email_slots', ['', '', '', ''])
         notes = info.get('notes', '')
-        if any(s.strip() for s in slots) or notes.strip():
-            shared[num] = {'email_slots': slots, 'notes': notes}
+        usage = info.get('usage', {})
+        has_slots = any(s.strip() for s in slots)
+        has_usage = any(v.strip() for v in usage.values()) if usage else False
+        if has_slots or notes.strip() or has_usage:
+            shared[num] = {'email_slots': slots, 'notes': notes, 'usage': usage}
     try:
         body = json.dumps(shared).encode()
         req = Request(_CLOUD_URL, data=body, method='PUT',
@@ -84,7 +88,8 @@ def cloud_merge(local_data, remote):
         if num not in local_data:
             local_data[num] = {'reservation_id': '', 'codes': [], 'messages': [],
                                'email_slots': rinfo.get('email_slots', ['', '', '', '']),
-                               'notes': rinfo.get('notes', '')}
+                               'notes': rinfo.get('notes', ''),
+                               'usage': rinfo.get('usage', {})}
         else:
             local_slots = local_data[num].get('email_slots', ['', '', '', ''])
             remote_slots = rinfo.get('email_slots', ['', '', '', ''])
@@ -100,6 +105,16 @@ def cloud_merge(local_data, remote):
                 local_data[num]['notes'] = rn
             elif ln:
                 local_data[num]['notes'] = ln
+            remote_usage = rinfo.get('usage', {})
+            local_usage = local_data[num].get('usage', {})
+            for utype in USAGE_TYPES:
+                rv = remote_usage.get(utype, '').strip()
+                lv = local_usage.get(utype, '').strip()
+                if rv:
+                    local_usage[utype] = rv
+                elif lv:
+                    local_usage[utype] = lv
+            local_data[num]['usage'] = local_usage
 
 # ─── TextVerified API ──────────────────────────────────────────────────────
 
@@ -230,17 +245,21 @@ class LoginWindow:
 class NicketsSMS:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title('Nickets SMS v5.3')
-        self.root.geometry('980x580')
-        self.root.minsize(860, 480)
+        self.root.title('Nickets SMS v6.0')
+        self.root.geometry('1060x640')
+        self.root.minsize(920, 540)
         self.root.resizable(True, True)
         self.root.configure(bg='#0d1117')
 
         self.data = load_data()
         self.api = API()
         self.numbers = []
+        self._filtered_numbers = []
         self._selected_number = None
         self._slot_entries = []
+        self._usage_entries = {}
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add('write', lambda *a: self._on_search())
 
         self._setup_styles()
         self._build_ui()
@@ -274,12 +293,30 @@ class NicketsSMS:
                               sashwidth=3, sashrelief='flat')
         main.pack(fill='both', expand=True, padx=10, pady=(0, 6))
 
-        # LEFT: Number list
+        # LEFT: Search + Number list
         left = tk.Frame(main, bg='#0d1117')
-        main.add(left, width=360, minsize=280)
+        main.add(left, width=380, minsize=300)
+
+        # Search bar
+        search_frame = tk.Frame(left, bg='#0d1117')
+        search_frame.pack(fill='x', pady=(4, 4))
+
+        tk.Label(search_frame, text='Search', font=('Segoe UI', 8),
+                 bg='#0d1117', fg='#8b949e').pack(side='left', padx=(0, 6))
+
+        self.search_entry = tk.Entry(search_frame, font=('Consolas', 10), bg='#161b22',
+                                     fg='#e6edf3', insertbackground='#e6edf3',
+                                     relief='flat', highlightthickness=1,
+                                     highlightcolor='#58a6ff', highlightbackground='#30363d',
+                                     textvariable=self._search_var)
+        self.search_entry.pack(side='left', fill='x', expand=True, ipady=3)
+
+        self.search_result_lbl = tk.Label(search_frame, text='', font=('Segoe UI', 7),
+                                           bg='#0d1117', fg='#8b949e')
+        self.search_result_lbl.pack(side='right', padx=(6, 0))
 
         tk.Label(left, text='Phone Numbers', font=('Segoe UI', 10, 'bold'),
-                 bg='#0d1117', fg='#c9d1d9').pack(anchor='w', pady=(4, 4))
+                 bg='#0d1117', fg='#c9d1d9').pack(anchor='w', pady=(2, 4))
 
         tbl_frame = tk.Frame(left, bg='#0d1117')
         tbl_frame.pack(fill='both', expand=True)
@@ -318,17 +355,20 @@ class NicketsSMS:
                                  bg='#0d1117', fg='#8b949e')
         self.info_lbl.pack(side='right')
 
-        # RIGHT: SMS + Email Slots
+        # RIGHT: SMS + Email Slots + Usage + Notes
         right = tk.Frame(main, bg='#0d1117')
-        main.add(right, minsize=380)
+        main.add(right, minsize=400)
+
+        right_scroll = tk.Frame(right, bg='#0d1117')
+        right_scroll.pack(fill='both', expand=True)
 
         # SMS panel
-        sms_frame = tk.LabelFrame(right, text='  SMS Messages  ',
+        sms_frame = tk.LabelFrame(right_scroll, text='  SMS Messages  ',
                                    font=('Segoe UI', 9, 'bold'),
                                    bg='#161b22', fg='#58a6ff',
                                    highlightbackground='#30363d', highlightthickness=1,
                                    relief='groove', bd=1)
-        sms_frame.pack(fill='both', expand=True, pady=(4, 6))
+        sms_frame.pack(fill='both', expand=True, pady=(4, 4))
 
         self.sms_hdr = tk.Frame(sms_frame, bg='#161b22')
         self.sms_hdr.pack(fill='x', padx=8, pady=(6, 4))
@@ -343,7 +383,7 @@ class NicketsSMS:
 
         self.sms_text = tk.Text(sms_frame, font=('Consolas', 9), bg='#0d1117',
                                 fg='#e6edf3', wrap='word', relief='flat',
-                                highlightthickness=0)
+                                highlightthickness=0, height=8)
         self.sms_text.pack(fill='both', expand=True, padx=8, pady=(0, 6))
         self.sms_text.insert('end', 'Click a number on the left to view its SMS messages.')
         self.sms_text.config(state='disabled')
@@ -351,13 +391,13 @@ class NicketsSMS:
         self.sms_text.tag_config('body', foreground='#e6edf3')
         self.sms_text.tag_config('hint', foreground='#8b949e')
 
-        # Email slots panel (per number)
-        slots_frame = tk.LabelFrame(right, text='  Email Slots  ',
+        # Email slots panel
+        slots_frame = tk.LabelFrame(right_scroll, text='  Email Slots  ',
                                      font=('Segoe UI', 9, 'bold'),
                                      bg='#161b22', fg='#58a6ff',
                                      highlightbackground='#30363d', highlightthickness=1,
                                      relief='groove', bd=1)
-        slots_frame.pack(fill='x', pady=(0, 2))
+        slots_frame.pack(fill='x', pady=(0, 4))
 
         slots_top = tk.Frame(slots_frame, bg='#161b22')
         slots_top.pack(fill='x', padx=8, pady=(4, 4))
@@ -395,8 +435,42 @@ class NicketsSMS:
 
             self._slot_entries.append((e, dot))
 
-        # Notes panel (per number)
-        notes_frame = tk.LabelFrame(right, text='  Notes  ',
+        # Number Usage panel (Creation / Recovery / Re-verification)
+        usage_frame = tk.LabelFrame(right_scroll, text='  Number Usage  ',
+                                     font=('Segoe UI', 9, 'bold'),
+                                     bg='#161b22', fg='#d29922',
+                                     highlightbackground='#30363d', highlightthickness=1,
+                                     relief='groove', bd=1)
+        usage_frame.pack(fill='x', pady=(0, 4))
+
+        usage_grid = tk.Frame(usage_frame, bg='#161b22')
+        usage_grid.pack(fill='x', padx=8, pady=(4, 8))
+
+        colors = {'Creation': '#3fb950', 'Recovery': '#58a6ff', 'Re-verification': '#d29922'}
+        self._usage_entries = {}
+        for utype in USAGE_TYPES:
+            row = tk.Frame(usage_grid, bg='#161b22')
+            row.pack(fill='x', pady=(0, 3))
+
+            tk.Label(row, text=utype, font=('Segoe UI', 8, 'bold'),
+                     bg='#161b22', fg=colors.get(utype, '#8b949e'),
+                     width=14, anchor='w').pack(side='left')
+
+            e = tk.Entry(row, font=('Consolas', 9), bg='#0d1117', fg='#e6edf3',
+                         insertbackground='#e6edf3', relief='flat',
+                         highlightthickness=1, highlightbackground='#30363d')
+            e.pack(side='left', fill='x', expand=True, padx=(4, 4), ipady=2)
+
+            save_btn = tk.Button(row, text='Set', font=('Segoe UI', 7, 'bold'),
+                                  bg='#d29922', fg='#0d1117', activebackground='#e3b341',
+                                  relief='flat', padx=8, cursor='hand2',
+                                  command=lambda ut=utype: self._save_usage(ut))
+            save_btn.pack(side='right')
+
+            self._usage_entries[utype] = e
+
+        # Notes panel
+        notes_frame = tk.LabelFrame(right_scroll, text='  Notes  ',
                                      font=('Segoe UI', 9, 'bold'),
                                      bg='#161b22', fg='#58a6ff',
                                      highlightbackground='#30363d', highlightthickness=1,
@@ -419,6 +493,66 @@ class NicketsSMS:
                   relief='flat', padx=10, cursor='hand2',
                   command=self._save_notes).pack(side='right')
 
+    # ─── Search ─────────────────────────────────────────────────────────────
+
+    def _on_search(self):
+        query = self._search_var.get().strip().lower()
+        if not query:
+            self._filtered_numbers = list(self.numbers)
+            self.search_result_lbl.config(text='')
+        else:
+            matched = set()
+            for num in self.numbers:
+                if query in num.lower():
+                    matched.add(num)
+                info = self.data.get(num, {})
+                slots = info.get('email_slots', [])
+                for s in slots:
+                    if s.strip() and query in s.lower():
+                        matched.add(num)
+                usage = info.get('usage', {})
+                for v in usage.values():
+                    if v.strip() and query in v.lower():
+                        matched.add(num)
+                notes = info.get('notes', '')
+                if notes and query in notes.lower():
+                    matched.add(num)
+            self._filtered_numbers = [n for n in self.numbers if n in matched]
+            self.search_result_lbl.config(
+                text=f'{len(self._filtered_numbers)} found',
+                fg='#3fb950' if self._filtered_numbers else '#f85149')
+        self._refresh_list()
+
+    # ─── Usage (Creation / Recovery / Re-verification) ──────────────────────
+
+    def _save_usage(self, utype):
+        num = self._selected_number
+        if not num or num not in self.data:
+            return
+        info = self.data[num]
+        if 'usage' not in info:
+            info['usage'] = {}
+        email = self._usage_entries[utype].get().strip()
+        info['usage'][utype] = email
+        save_data(self.data)
+        self.info_lbl.config(text=f'{utype} saved & synced', fg='#3fb950')
+        threading.Thread(target=lambda: cloud_push(self.data), daemon=True).start()
+
+    def _load_usage_for_number(self, num):
+        info = self.data.get(num, {})
+        usage = info.get('usage', {})
+        for utype, entry in self._usage_entries.items():
+            entry.config(state='normal')
+            entry.delete(0, 'end')
+            entry.insert(0, usage.get(utype, ''))
+
+    def _clear_usage(self):
+        for entry in self._usage_entries.values():
+            entry.config(state='normal')
+            entry.delete(0, 'end')
+
+    # ─── Notes ──────────────────────────────────────────────────────────────
+
     def _save_notes(self):
         num = self._selected_number
         if not num or num not in self.data:
@@ -436,6 +570,8 @@ class NicketsSMS:
         self.notes_entry.config(state='normal')
         self.notes_entry.delete(0, 'end')
         self.notes_entry.insert(0, note)
+
+    # ─── Slots ──────────────────────────────────────────────────────────────
 
     def _get_slot_count(self, num):
         info = self.data.get(num, {})
@@ -491,6 +627,8 @@ class NicketsSMS:
         self._refresh_list()
         self.info_lbl.config(text=f'Slot {slot_idx+1} saved & synced', fg='#3fb950')
         threading.Thread(target=lambda: cloud_push(self.data), daemon=True).start()
+
+    # ─── Tree / List ────────────────────────────────────────────────────────
 
     def _on_double_click_notes(self, event):
         region = self.tree.identify('region', event.x, event.y)
@@ -548,6 +686,7 @@ class NicketsSMS:
         self.sms_text.insert('end', 'Loading messages...', 'hint')
         self.sms_text.config(state='disabled')
         self._load_slots_for_number(num)
+        self._load_usage_for_number(num)
         self._load_notes_for_number(num)
 
         def do():
@@ -595,6 +734,7 @@ class NicketsSMS:
                 cloud_merge(self.data, remote)
             self._load_numbers_sync()
             cloud_push(self.data)
+            self.root.after(0, lambda: setattr(self, '_filtered_numbers', list(self.numbers)))
             self.root.after(0, self._refresh_list)
             self.root.after(0, self.status_lbl.config, {'text': 'live', 'fg': '#3fb950'})
         threading.Thread(target=do, daemon=True).start()
@@ -619,16 +759,20 @@ class NicketsSMS:
                 self.data[phone] = {'reservation_id': res_id,
                                     'codes': [], 'messages': [],
                                     'email_slots': ['', '', '', ''],
-                                    'notes': ''}
+                                    'notes': '',
+                                    'usage': {}}
             else:
                 self.data[phone]['reservation_id'] = res_id
                 if 'email_slots' not in self.data[phone]:
                     self.data[phone]['email_slots'] = ['', '', '', '']
                 if 'notes' not in self.data[phone]:
                     self.data[phone]['notes'] = ''
+                if 'usage' not in self.data[phone]:
+                    self.data[phone]['usage'] = {}
             self.numbers.append(phone)
             total += 1
             self.root.after(0, self.count_lbl.config, {'text': f'{total} numbers'})
+        self._filtered_numbers = list(self.numbers)
         save_data(self.data)
 
     def _refresh_list(self):
@@ -636,7 +780,8 @@ class NicketsSMS:
         for item in self.tree.get_children():
             self.tree.delete(item)
         sel_iid = None
-        for num in self.numbers:
+        display = self._filtered_numbers if self._filtered_numbers is not None else self.numbers
+        for num in display:
             info = self.data.get(num, {})
             status = self._get_slot_status(num)
             code = ''
@@ -649,7 +794,7 @@ class NicketsSMS:
         if sel_iid:
             self.tree.selection_set(sel_iid)
             self.tree.see(sel_iid)
-        count = len(self.numbers)
+        count = len(display)
         self.count_lbl.config(text=f'{count} number{"s" if count != 1 else ""}')
 
     def _get_selected_number(self):
@@ -699,6 +844,7 @@ class NicketsSMS:
                     self.root.after(0, self._refresh_list)
                     if self._selected_number:
                         self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
+                        self.root.after(0, lambda: self._load_usage_for_number(self._selected_number))
                         self.root.after(0, lambda: self._load_notes_for_number(self._selected_number))
                 except Exception:
                     pass
@@ -735,6 +881,7 @@ class NicketsSMS:
             if self._selected_number:
                 self.root.after(0, lambda: self._show_sms(self._selected_number))
                 self.root.after(0, lambda: self._load_slots_for_number(self._selected_number))
+                self.root.after(0, lambda: self._load_usage_for_number(self._selected_number))
             self.root.after(0, self.info_lbl.config, {'text': 'Synced', 'fg': '#3fb950'})
         threading.Thread(target=do, daemon=True).start()
 
